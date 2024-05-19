@@ -53,18 +53,15 @@ class BertSelfAttention(nn.Module):
     dk = key.size(3)
     K_T = key.transpose(-1, -2)
     QK_T = torch.matmul(query, K_T)
-    att_softmax = F.softmax(QK_T/math.sqrt(dk)+attention_mask, -1)
-    att_probs = self.dropout(att_softmax)
+    att_probs = self.dropout(F.softmax(QK_T/math.sqrt(dk)+attention_mask, -1))
     weighted_vals = torch.matmul(att_probs, value)
     num_attention_heads = weighted_vals.size(1)
     attention_head_size = weighted_vals.size(3)
-    final_head_size = num_attention_heads*attention_head_size
+    hidden_size = num_attention_heads*attention_head_size
     weighted_vals = weighted_vals.permute(0, 2, 1, 3)
     bs = weighted_vals.size(0)
     seq_len = weighted_vals.size(1)
-    weighted_vals = weighted_vals.reshape(bs, seq_len, final_head_size)
-    return weighted_vals
-
+    return weighted_vals.reshape(bs, seq_len, hidden_size)
 
   def forward(self, hidden_states, attention_mask):
     """
@@ -136,8 +133,7 @@ class BertLayer(nn.Module):
     output_dense_layer = self.out_dense
     output_dropout = self.out_dropout
     output_ln_layer = self.out_layer_norm
-    layer_output = self.add_norm(add_norm, feed_forward, output_dense_layer, output_dropout, output_ln_layer)
-    return layer_output
+    return self.add_norm(add_norm, feed_forward, output_dense_layer, output_dropout, output_ln_layer)
 
 
 

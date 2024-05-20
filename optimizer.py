@@ -67,31 +67,33 @@ class AdamW(Optimizer):
 
                 ### 
 
+                if len(state) == 0:
+                    state['t'] = 0
+                    state['mt'] =  torch.zeros_like(p.data)
+                    state['vt'] =  torch.zeros_like(p.data)
+
                 beta1, beta2 = group['betas']
                 eps = group['eps']
                 weight_decay = group['weight_decay']
 
-                m_prev = state.get('m', torch.zeros_like(p.data, device=DEVICE))  # default to initializations of m,v,t for 1st iter
-                v_prev = state.get('v', torch.zeros_like(p.data, device=DEVICE))
-                grad = grad.to(DEVICE)
-                t = state.get('t', 0)
-                
-                t = t + 1
-                mt = beta1 * m_prev + (1 - beta1) * grad
-                vt = beta2 * v_prev + (1 - beta2) * grad ** 2
+                state['t'] += 1 
 
-                alphat = alpha * math.sqrt(1 - beta2**t) / (1 - beta1 **t)
-                p.data.add_(-alphat * mt / (vt.sqrt() + eps))
+                # moving average 1st and 2nd moments
+                state['mt'].mul_(beta1).add_(grad, alpha=1 - beta1)
+                state['vt'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                # weight decay, update loss and gradient
-                # loss += 0.5 * weight_decay * torch.sum(p.data * p.data)
-                p.data -= alpha * weight_decay * p.data
+                # bias corrections for 'warmup' effect
+                bias_correction1 = 1 - beta1 ** state['t']
+                bias_correction2 = 1 - beta2 ** state['t']
+                alphat = alpha * math.sqrt(bias_correction2) / bias_correction1
 
-                # update state
-                state['m'] = mt
-                state['v'] = vt
-                state['t'] = t
-                self.state[p] = state
+                # actually take a step for params
+                p.data.addcdiv_(state['mt'], 
+                                state['vt'].sqrt().add_(eps), 
+                                value=-alphat)
 
+                # L2 reg
+                if weight_decay != 0:
+                    p.data.add_(p.data, alpha=-alpha * weight_decay)
 
         return loss

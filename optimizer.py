@@ -4,6 +4,12 @@ import math
 import torch
 from torch.optim import Optimizer
 
+DEVICE = "cpu"
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+
 
 class AdamW(Optimizer):
     def __init__(
@@ -65,14 +71,9 @@ class AdamW(Optimizer):
                 eps = group['eps']
                 weight_decay = group['weight_decay']
 
-                device = "cpu"
-                if torch.cuda.is_available():
-                    device = torch.device("cuda")
-                elif torch.backends.mps.is_available():
-                    device = torch.device("mps")
-
-                m_prev = state.get('m', torch.zeros(p.data.shape).to(device))  # default to initializations of m,v,t for 1st iter
-                v_prev = state.get('v', torch.zeros(p.data.shape).to(device))
+                m_prev = state.get('m', torch.zeros_like(p.data, device=DEVICE))  # default to initializations of m,v,t for 1st iter
+                v_prev = state.get('v', torch.zeros_like(p.data, device=DEVICE))
+                grad = grad.to(DEVICE)
                 t = state.get('t', 0)
                 
                 t = t + 1
@@ -80,7 +81,7 @@ class AdamW(Optimizer):
                 vt = beta2 * v_prev + (1 - beta2) * grad ** 2
 
                 alphat = alpha * math.sqrt(1 - beta2**t) / (1 - beta1 **t)
-                p.data -= alphat * mt / (torch.sqrt(vt) + eps)
+                p.data.add_(-alphat * mt / (vt.sqrt() + eps))
 
                 # weight decay, update loss and gradient
                 # loss += 0.5 * weight_decay * torch.sum(p.data * p.data)

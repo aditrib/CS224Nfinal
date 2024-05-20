@@ -6,3 +6,4 @@ __pycache__/base_bert.cpython-38.pyc
 _pycache__/config.cpython-38.py
 __pycache__/utils.cpython-38.pyc
 *.pyc
+.zip

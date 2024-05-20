@@ -65,18 +65,19 @@ class AdamW(Optimizer):
                 eps = group['eps']
                 weight_decay = group['weight_decay']
 
-                try:
-                    m = state['m']
-                    v = state['v']
-                    t = state['t']
-                except KeyError:   # need to initialize moments
-                    m = [0]
-                    v = [0]
-                    t = 0
+                device = "cpu"
+                if torch.cuda.is_available():
+                    device = torch.device("cuda")
+                elif torch.backends.mps.is_available():
+                    device = torch.device("mps")
+
+                m_prev = state.get('m', torch.zeros(p.data.shape).to(device))  # default to initializations of m,v,t for 1st iter
+                v_prev = state.get('v', torch.zeros(p.data.shape).to(device))
+                t = state.get('t', 0)
                 
                 t = t + 1
-                mt = beta1 * m[t-1] + (1 - beta1) * grad
-                vt = beta2 * v[t-1] + (1 - beta2) * grad ** 2
+                mt = beta1 * m_prev + (1 - beta1) * grad
+                vt = beta2 * v_prev + (1 - beta2) * grad ** 2
 
                 alphat = alpha * math.sqrt(1 - beta2**t) / (1 - beta1 **t)
                 p.data -= alphat * mt / (torch.sqrt(vt) + eps)
@@ -86,14 +87,10 @@ class AdamW(Optimizer):
                 p.data -= alpha * weight_decay * p.data
 
                 # update state
-                m.append(mt)
-                v.append(vt)
-                state['m'] = m
-                state['v'] = v
+                state['m'] = mt
+                state['v'] = vt
                 state['t'] = t
-
                 self.state[p] = state
-
 
 
         return loss

@@ -80,7 +80,7 @@ class AdamW(Optimizer):
 
                 # moving average 1st and 2nd moments
                 state['mt'].mul_(beta1).add_(grad, alpha=1 - beta1)
-                state['vt'].mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                state['vt'].mul_(beta2).add_((1 - beta2) * (grad * grad))
 
                 # bias corrections for 'warmup' effect
                 bias_correction1 = 1 - beta1 ** state['t']

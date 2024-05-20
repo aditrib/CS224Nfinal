@@ -83,9 +83,7 @@ class AdamW(Optimizer):
                 state['vt'].mul_(beta2).add_((1 - beta2) * (grad * grad))
 
                 # bias corrections for 'warmup' effect
-                bias_correction1 = 1 - beta1 ** state['t']
-                bias_correction2 = 1 - beta2 ** state['t']
-                alphat = alpha * math.sqrt(bias_correction2) / bias_correction1
+                alphat = alpha * math.sqrt(1 - beta2 ** state['t']) / (1 - beta1 ** state['t'])
 
                 # actually take a step for params
                 p.data.addcdiv_(state['mt'], 

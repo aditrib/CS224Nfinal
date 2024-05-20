@@ -72,7 +72,7 @@ class AdamW(Optimizer):
                     state['mt'] = torch.zeros_like(p.data)
                     state['vt'] = torch.zeros_like(p.data)
 
-                mt, vt = state['exp_avg'], state['exp_avg_sq']
+                mt, vt = state['mt'], state['vt']
                 beta1, beta2 = group['betas']
                 eps = group['eps']
                 weight_decay = group['weight_decay']

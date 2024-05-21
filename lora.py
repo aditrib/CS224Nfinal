@@ -10,10 +10,11 @@ from optimizer import AdamW
 from tqdm import tqdm
 
 ### Added imports below, removed some from above
-from classifier import model_eval, save_model, load_data, test, seed_everything
-from classifier import SentimentDataset, BertSentimentClassifier
+from classifier import model_eval, model_test_eval, save_model, load_data, test, seed_everything
+from classifier import SentimentDataset, SentimentTestDataset, BertSentimentClassifier
 
 from lora_bert import LoRABertSelfAttention, LoRALayer
+import time
 ###
 
 TQDM_DISABLE=False
@@ -152,6 +153,46 @@ def train(args):
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
+def test(args):
+    with torch.no_grad():
+        device = torch.device('cpu')
+        if args.use_gpu:
+            if torch.cuda.is_available():
+                device = torch.device('cuda') 
+            elif torch.backends.mps.is_available():
+                device = torch.device('mps')
+        saved = torch.load(args.filepath)
+        config = saved['model_config']
+        ### Adapted to include the LoRA hyperparameter r.
+        lora_r = args.lora_r
+        model = BertSentimentClassifier(config, lora_r)
+        ###
+        model.load_state_dict(saved['model'])
+        model = model.to(device)
+        print(f"load model from {args.filepath}")
+        
+        dev_data = load_data(args.dev, 'valid')
+        dev_dataset = SentimentDataset(dev_data, args)
+        dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=dev_dataset.collate_fn)
+
+        test_data = load_data(args.test, 'test')
+        test_dataset = SentimentTestDataset(test_data, args)
+        test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size, collate_fn=test_dataset.collate_fn)
+        
+        dev_acc, dev_f1, dev_pred, dev_true, dev_sents, dev_sent_ids = model_eval(dev_dataloader, model, device)
+        print('DONE DEV')
+        test_pred, test_sents, test_sent_ids = model_test_eval(test_dataloader, model, device)
+        print('DONE Test')
+        with open(args.dev_out, "w+") as f:
+            print(f"dev acc :: {dev_acc :.3f}")
+            f.write(f"id \t Predicted_Sentiment \n")
+            for p, s in zip(dev_sent_ids,dev_pred ):
+                f.write(f"{p} , {s} \n")
+
+        with open(args.test_out, "w+") as f:
+            f.write(f"id \t Predicted_Sentiment \n")
+            for p, s  in zip(test_sent_ids,test_pred ):
+                f.write(f"{p} , {s} \n")
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -193,15 +234,22 @@ if __name__ == "__main__":
         test='data/ids-sst-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
         ### Added LoRA to filenames
-        dev_out = 'predictions/' + args.fine_tune_mode + '-LoRA-sst-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-LoRA-sst-test-out.csv',
+        dev_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-sst-dev-out.csv',
+        test_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-sst-test-out.csv',
         ###
         ### Pass loRA hyperparameter r to config
         lora_r = args.lora_r
         ###
     )
 
+    start_time = time.time()
     train(config)
+    end_time = time.time()
+    print('Total time:', end_time - start_time)
+    # Save file with total time and lora_r
+    with open(f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-sst-time.txt', 'w') as f:
+        f.write(f'Total time: {end_time - start_time} \n')
+        f.write(f'lora_r: {args.lora_r} \n')
 
     print('Evaluating on SST...')
     test(config)
@@ -221,15 +269,22 @@ if __name__ == "__main__":
         test='data/ids-cfimdb-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
         ### Added LoRA to filenames
-        dev_out = 'predictions/' + args.fine_tune_mode + '-LoRA-cfimdb-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-LoRA-cfimdb-test-out.csv',
+        dev_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-cfimdb-dev-out.csv',
+        test_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-cfimdb-test-out.csv',
         ###
         ### Pass loRA hyperparameter r to config
         lora_r = args.lora_r
         ###
     )
 
+    start_time = time.time()
     train(config)
+    end_time = time.time()
+    print('Total time:', end_time - start_time)
+    # Save file with total time and lora_r
+    with open(f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-sst-time.txt', 'w') as f:
+        f.write(f'Total time: {end_time - start_time} \n')
+        f.write(f'lora_r: {args.lora_r} \n')
 
     print('Evaluating on cfimdb...')
     test(config)

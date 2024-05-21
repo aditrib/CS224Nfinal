@@ -73,8 +73,10 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
-        raise NotImplementedError
-
+        self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
+        self.paraphrase_linear = nn.Linear(BERT_HIDDEN_SIZE, 1)
+        self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE+1, 1)
+        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -83,7 +85,8 @@ class MultitaskBERT(nn.Module):
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
         ### TODO
-        raise NotImplementedError
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        return outputs['pooler_output'] 
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -93,7 +96,8 @@ class MultitaskBERT(nn.Module):
         Thus, your output should contain 5 logits for each sentence.
         '''
         ### TODO
-        raise NotImplementedError
+        pooled_output = self.forward(input_ids, attention_mask)
+        return self.sentiment_linear(pooled_output)
 
 
     def predict_paraphrase(self,
@@ -104,7 +108,10 @@ class MultitaskBERT(nn.Module):
         during evaluation.
         '''
         ### TODO
-        raise NotImplementedError
+        output_1 = self.forward(input_ids_1, attention_mask_1)
+        output_2 = self.forward(input_ids_2, attention_mask_2)
+        diff = torch.abs(output_1 - output_2)
+        return self.paraphrase_linear(diff)
 
 
     def predict_similarity(self,
@@ -114,9 +121,13 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit).
         '''
         ### TODO
-        raise NotImplementedError
-
-
+        output_1 = self.forward(input_ids_1, attention_mask_1)
+        output_2 = self.forward(input_ids_2, attention_mask_2)
+        cosine_sim = F.cosine_similarity(output_1, output_2).unsqueeze(-1)
+        elem_prods = output_1 * output_2
+        diff = torch.abs(output_1 - output_2)
+        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
+        return self.similarity_linear(features)
 
 
 def save_model(model, optimizer, args, config, filepath):

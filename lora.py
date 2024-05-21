@@ -181,7 +181,7 @@ if __name__ == "__main__":
     print('Training Sentiment Classifier on SST...')
     config = SimpleNamespace(
         ### Added LoRA to filenames
-        filepath='-LoRA-sst-classifier.pt',
+        filepath='LoRA-sst-classifier.pt',
         ###
         lr=args.lr,
         use_gpu=args.use_gpu,

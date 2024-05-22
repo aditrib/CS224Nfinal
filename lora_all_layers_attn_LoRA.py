@@ -1,30 +1,24 @@
-import random, numpy as np, argparse
+import argparse
 from types import SimpleNamespace
-import csv
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import f1_score, accuracy_score
+from torch.utils.data import  DataLoader
 
-from tokenizer import BertTokenizer
 from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 
+### Added imports below, removed some from above
+from classifier import model_eval, model_test_eval, save_model, load_data, test, seed_everything
+from classifier import SentimentDataset, SentimentTestDataset, BertSentimentClassifier
+
+from lora_bert import LoRABertSelfAttention, LoRALayer
+import time
+###
 
 TQDM_DISABLE=False
-
-
-# Fix the random seed.
-def seed_everything(seed=11711):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
 
 
 class BertSentimentClassifier(torch.nn.Module):
@@ -34,10 +28,13 @@ class BertSentimentClassifier(torch.nn.Module):
     In the SST dataset, there are 5 sentiment categories (from 0 - "negative" to 4 - "positive").
     Thus, your forward() should return one logit for each of the 5 classes.
     '''
-    def __init__(self, config):
+    def __init__(self, config, r):
         super(BertSentimentClassifier, self).__init__()
         self.num_labels = config.num_labels
         self.bert = BertModel.from_pretrained('bert-base-uncased')
+        ### Apply LoRA self-attention layers to the BERT model.
+        self.bert = replace_all_linear_layers(self.bert, r)
+        ###
 
         # Pretrain mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
@@ -67,176 +64,25 @@ class BertSentimentClassifier(torch.nn.Module):
 
         return out
 
+### NEW FUNCTION BELOW    
+# Replace the self-attention layers in the BERT model with LoRA self-attention layers.
+def replace_all_linear_layers(bert_model, r):
+    for name, module in bert_model.named_modules():
+        if isinstance(module, nn.Linear):
+            in_features = module.in_features
+            out_features = module.out_features
+            # Replace the linear layer with a LoRA layer
+            setattr(bert_model, name, LoRALayer(in_features, out_features, r))
+    
+    # Special handling for attention layers
+    for i, layer in enumerate(bert_model.bert_layers):
+        # Assuming the attention module has a specific naming or structure to replace
+        layer.self_attention.query = LoRALayer(layer.self_attention.query.in_features, layer.self_attention.query.out_features, r)
+        layer.self_attention.key = LoRALayer(layer.self_attention.key.in_features, layer.self_attention.key.out_features, r)
+        layer.self_attention.value = LoRALayer(layer.self_attention.value.in_features, layer.self_attention.value.out_features, r)
 
-
-class SentimentDataset(Dataset):
-    def __init__(self, dataset, args):
-        self.dataset = dataset
-        self.p = args
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        return self.dataset[idx]
-
-    def pad_data(self, data):
-        sents = [x[0] for x in data]
-        labels = [x[1] for x in data]
-        sent_ids = [x[2] for x in data]
-
-        encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True)
-        token_ids = torch.LongTensor(encoding['input_ids'])
-        attention_mask = torch.LongTensor(encoding['attention_mask'])
-        labels = torch.LongTensor(labels)
-
-        return token_ids, attention_mask, labels, sents, sent_ids
-
-    def collate_fn(self, all_data):
-        token_ids, attention_mask, labels, sents, sent_ids= self.pad_data(all_data)
-
-        batched_data = {
-                'token_ids': token_ids,
-                'attention_mask': attention_mask,
-                'labels': labels,
-                'sents': sents,
-                'sent_ids': sent_ids
-            }
-
-        return batched_data
-
-
-class SentimentTestDataset(Dataset):
-    def __init__(self, dataset, args):
-        self.dataset = dataset
-        self.p = args
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, idx):
-        return self.dataset[idx]
-
-    def pad_data(self, data):
-        sents = [x[0] for x in data]
-        sent_ids = [x[1] for x in data]
-
-        encoding = self.tokenizer(sents, return_tensors='pt', padding=True, truncation=True)
-        token_ids = torch.LongTensor(encoding['input_ids'])
-        attention_mask = torch.LongTensor(encoding['attention_mask'])
-
-        return token_ids, attention_mask, sents, sent_ids
-
-    def collate_fn(self, all_data):
-        token_ids, attention_mask, sents, sent_ids= self.pad_data(all_data)
-
-        batched_data = {
-                'token_ids': token_ids,
-                'attention_mask': attention_mask,
-                'sents': sents,
-                'sent_ids': sent_ids
-            }
-
-        return batched_data
-
-
-# Load the data: a list of (sentence, label).
-def load_data(filename, flag='train'):
-    num_labels = {}
-    data = []
-    if flag == 'test':
-        with open(filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
-                sent = record['sentence'].lower().strip()
-                sent_id = record['id'].lower().strip()
-                data.append((sent,sent_id))
-    else:
-        with open(filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
-                sent = record['sentence'].lower().strip()
-                sent_id = record['id'].lower().strip()
-                label = int(record['sentiment'].strip())
-                if label not in num_labels:
-                    num_labels[label] = len(num_labels)
-                data.append((sent, label,sent_id))
-        print(f"load {len(data)} data from {filename}")
-
-    if flag == 'train':
-        return data, len(num_labels)
-    else:
-        return data
-
-
-# Evaluate the model on dev examples.
-def model_eval(dataloader, model, device):
-    model.eval() # Switch to eval model, will turn off randomness like dropout.
-    y_true = []
-    y_pred = []
-    sents = []
-    sent_ids = []
-    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
-        b_ids, b_mask, b_labels, b_sents, b_sent_ids = batch['token_ids'],batch['attention_mask'],  \
-                                                        batch['labels'], batch['sents'], batch['sent_ids']
-
-        b_ids = b_ids.to(device)
-        b_mask = b_mask.to(device)
-
-        logits = model(b_ids, b_mask)
-        logits = logits.detach().cpu().numpy()
-        preds = np.argmax(logits, axis=1).flatten()
-
-        b_labels = b_labels.flatten()
-        y_true.extend(b_labels)
-        y_pred.extend(preds)
-        sents.extend(b_sents)
-        sent_ids.extend(b_sent_ids)
-
-    f1 = f1_score(y_true, y_pred, average='macro')
-    acc = accuracy_score(y_true, y_pred)
-
-    return acc, f1, y_pred, y_true, sents, sent_ids
-
-
-# Evaluate the model on test examples.
-def model_test_eval(dataloader, model, device):
-    model.eval() # Switch to eval model, will turn off randomness like dropout.
-    y_pred = []
-    sents = []
-    sent_ids = []
-    for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
-        b_ids, b_mask, b_sents, b_sent_ids = batch['token_ids'],batch['attention_mask'],  \
-                                                         batch['sents'], batch['sent_ids']
-
-        b_ids = b_ids.to(device)
-        b_mask = b_mask.to(device)
-
-        logits = model(b_ids, b_mask)
-        logits = logits.detach().cpu().numpy()
-        preds = np.argmax(logits, axis=1).flatten()
-
-        y_pred.extend(preds)
-        sents.extend(b_sents)
-        sent_ids.extend(b_sent_ids)
-
-    return y_pred, sents, sent_ids
-
-
-def save_model(model, optimizer, args, config, filepath):
-    save_info = {
-        'model': model.state_dict(),
-        'optim': optimizer.state_dict(),
-        'args': args,
-        'model_config': config,
-        'system_rng': random.getstate(),
-        'numpy_rng': np.random.get_state(),
-        'torch_rng': torch.random.get_rng_state(),
-    }
-
-    torch.save(save_info, filepath)
-    print(f"save the model to {filepath}")
-
+    return bert_model
+###
 
 def train(args):
     device = torch.device('cpu')
@@ -265,8 +111,21 @@ def train(args):
               'fine_tune_mode': args.fine_tune_mode}
 
     config = SimpleNamespace(**config)
+    ### Adapted to include the LoRA hyperparameter r.
+    lora_r = args.lora_r
+    model = BertSentimentClassifier(config, lora_r)
 
-    model = BertSentimentClassifier(config)
+    # Freeze the original BERT weights
+    for param in model.bert.parameters():
+        param.requires_grad = False
+
+    # Ensure LoRA layers' parameters are trainable
+    for param in model.bert.modules():
+        if isinstance(param, LoRALayer):
+            param.lora_A.weight.requires_grad = True
+            param.lora_B.weight.requires_grad = True
+    ###
+
     model = model.to(device)
 
     lr = args.lr
@@ -307,7 +166,6 @@ def train(args):
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
-
 def test(args):
     with torch.no_grad():
         device = torch.device('cpu')
@@ -318,7 +176,10 @@ def test(args):
                 device = torch.device('mps')
         saved = torch.load(args.filepath)
         config = saved['model_config']
-        model = BertSentimentClassifier(config)
+        ### Adapted to include the LoRA hyperparameter r.
+        lora_r = args.lora_r
+        model = BertSentimentClassifier(config, lora_r)
+        ###
         model.load_state_dict(saved['model'])
         model = model.to(device)
         print(f"load model from {args.filepath}")
@@ -345,7 +206,7 @@ def test(args):
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s  in zip(test_sent_ids,test_pred ):
                 f.write(f"{p} , {s} \n")
-
+    return dev_acc
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -360,6 +221,9 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-3)
+    ### Added LoRA hyperparameter r argument
+    parser.add_argument("--lora_r", type=int, help="rank for LoRA matrices", default=2)
+    ###
 
     args = parser.parse_args()
     return args
@@ -371,7 +235,9 @@ if __name__ == "__main__":
 
     print('Training Sentiment Classifier on SST...')
     config = SimpleNamespace(
-        filepath='sst-classifier.pt',
+        ### Added LoRA to filenames
+        filepath='LoRA-sst-classifier.pt',
+        ###
         lr=args.lr,
         use_gpu=args.use_gpu,
         epochs=args.epochs,
@@ -381,25 +247,31 @@ if __name__ == "__main__":
         dev='data/ids-sst-dev.csv',
         test='data/ids-sst-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
+        ### Added LoRA to filenames
+        dev_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_sst-dev-out.csv',
+        test_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_sst-test-out.csv',
+        ###
+        ### Pass loRA hyperparameter r to config
+        lora_r = args.lora_r
+        ###
     )
 
     start_time = time.time()
     train(config)
     end_time = time.time()
     print('Total time:', end_time - start_time)
+    dev_acc = test(config)
     # Save file with total time and lora_r
-    with open(f'predictions/{args.fine_tune_mode}-sst-time.txt', 'w') as f:
+    with open(f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_sst-time.txt', 'w') as f:
         f.write(f'Total time: {end_time - start_time} \n')
         f.write(f'lora_r: {args.lora_r} \n')
-
-    print('Evaluating on SST...')
-    test(config)
+        f.write(f'dev_acc: {dev_acc}')
 
     print('Training Sentiment Classifier on cfimdb...')
     config = SimpleNamespace(
-        filepath='cfimdb-classifier.pt',
+        ### Added LoRA to filenames
+        filepath='LoRA-cfimdb-classifier.pt',
+        ###
         lr=args.lr,
         use_gpu=args.use_gpu,
         epochs=args.epochs,
@@ -409,18 +281,26 @@ if __name__ == "__main__":
         dev='data/ids-cfimdb-dev.csv',
         test='data/ids-cfimdb-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
+        ### Added LoRA to filenames
+        dev_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_cfimdb-dev-out.csv',
+        test_out = f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_cfimdb-test-out.csv',
+        ###
+        ### Pass loRA hyperparameter r to config
+        lora_r = args.lora_r
+        ###
     )
 
     start_time = time.time()
     train(config)
     end_time = time.time()
     print('Total time:', end_time - start_time)
-    # Save file with total time and lora_r
-    with open(f'predictions/{args.fine_tune_mode}-cfimdb-time.txt', 'w') as f:
-        f.write(f'Total time: {end_time - start_time} \n')
-        f.write(f'lora_r: {args.lora_r} \n')
 
     print('Evaluating on cfimdb...')
-    test(config)
+    dev_acc = test(config)
+
+    # Save file with total time and lora_r
+    with open(f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}-all_layers_cfimdb-time.txt', 'w') as f:
+        f.write(f'Total time: {end_time - start_time} \n')
+        f.write(f'lora_r: {args.lora_r} \n')
+        f.write(f'dev_acc: {dev_acc}')
+

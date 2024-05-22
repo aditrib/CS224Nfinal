@@ -9,6 +9,12 @@ class LoRALayer(nn.Module):
         if r > 0:
             self.lora_A = nn.Linear(in_features, r, bias=False)
             self.lora_B = nn.Linear(r, out_features, bias=False)
+
+            # Initialize lora_A with Gaussian distributed weights
+            nn.init.normal_(self.lora_A.weight, mean=0.0, std=0.02)  # You can adjust mean and std as needed
+            
+            # Initialize lora_B with zeros
+            nn.init.zeros_(self.lora_B.weight)
         else:
             self.lora_A = None
             self.lora_B = None
@@ -36,8 +42,8 @@ class LoRABertSelfAttention(BertSelfAttention):
         self.query_lora = LoRALayer(config.hidden_size, self.all_head_size, r)
         self.value_lora = LoRALayer(config.hidden_size, self.all_head_size, r)
 
-        self.query_lora.svd_init(self.query.weight.data)
-        self.value_lora.svd_init(self.value.weight.data)
+        # self.query_lora.svd_init(self.query.weight.data)
+        # self.value_lora.svd_init(self.value.weight.data)
 
     def transform(self, x, linear_layer, lora_layer):
         bs, seq_len = x.shape[:2]

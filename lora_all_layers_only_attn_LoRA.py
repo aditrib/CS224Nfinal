@@ -102,6 +102,16 @@ def train(args):
     lora_r = args.lora_r
     model = BertSentimentClassifier(config, lora_r)
 
+    # Freeze all parameters in the model
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Unfreeze all parameters not in attention layers, except for LoRA attention layers
+    for name, param in model.named_parameters():
+    # Check if this parameter is part of a non-attention layer or a LoRALayer in an attention block
+        if not "self_attention" in name:
+            param.requires_grad = True
+
     # Ensure LoRA layers' parameters are trainable
     for param in model.bert.modules():
         if isinstance(param, LoRALayer):

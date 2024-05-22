@@ -347,6 +347,7 @@ def test(args):
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s  in zip(test_sent_ids,test_pred ):
                 f.write(f"{p} , {s} \n")
+    return dev_acc
 
 
 def get_args():
@@ -391,13 +392,14 @@ if __name__ == "__main__":
     train(config)
     end_time = time.time()
     print('Total time:', end_time - start_time)
+
+    print('Evaluating on SST...')
+    dev_acc = test(config)
+
     # Save file with total time and lora_r
     with open(f'predictions/{args.fine_tune_mode}-sst-time.txt', 'w') as f:
         f.write(f'Total time: {end_time - start_time} \n')
-        f.write(f'lora_r: {args.lora_r} \n')
-
-    print('Evaluating on SST...')
-    test(config)
+        f.write(f'dev_acc: {dev_acc}')
 
     print('Training Sentiment Classifier on cfimdb...')
     config = SimpleNamespace(
@@ -419,10 +421,11 @@ if __name__ == "__main__":
     train(config)
     end_time = time.time()
     print('Total time:', end_time - start_time)
+
+    print('Evaluating on cfimdb...')
+    dev_acc = test(config)
+
     # Save file with total time and lora_r
     with open(f'predictions/{args.fine_tune_mode}-cfimdb-time.txt', 'w') as f:
         f.write(f'Total time: {end_time - start_time} \n')
-        f.write(f'lora_r: {args.lora_r} \n')
-
-    print('Evaluating on cfimdb...')
-    test(config)
+        f.write(f'dev_acc: {dev_acc}')

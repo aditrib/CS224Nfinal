@@ -67,19 +67,28 @@ class BertSentimentClassifier(torch.nn.Module):
 ### NEW FUNCTION BELOW    
 # Replace the self-attention layers in the BERT model with LoRA self-attention layers.
 def replace_all_linear_layers(bert_model, r):
+    # First, collect all linear layers and specific attention components to replace
+    layers_to_replace = {}
     for name, module in bert_model.named_modules():
         if isinstance(module, nn.Linear):
             in_features = module.in_features
             out_features = module.out_features
-            # Replace the linear layer with a LoRA layer
-            setattr(bert_model, name, LoRALayer(in_features, out_features, r))
-    
-    # Special handling for attention layers
-    for i, layer in enumerate(bert_model.bert_layers):
-        # Assuming the attention module has a specific naming or structure to replace
-        layer.self_attention.query = LoRALayer(layer.self_attention.query.in_features, layer.self_attention.query.out_features, r)
-        layer.self_attention.key = LoRALayer(layer.self_attention.key.in_features, layer.self_attention.key.out_features, r)
-        layer.self_attention.value = LoRALayer(layer.self_attention.value.in_features, layer.self_attention.value.out_features, r)
+            # Store the module's path and its replacement
+            layers_to_replace[name] = LoRALayer(in_features, out_features, r)
+        elif hasattr(module, 'self_attention'):  # Check if module is an attention block
+            # Replace query, key, value projection matrices
+            layers_to_replace[f"{name}.self_attention.query"] = LoRALayer(module.self_attention.query.in_features, module.self_attention.query.out_features, r)
+            layers_to_replace[f"{name}.self_attention.key"] = LoRALayer(module.self_attention.key.in_features, module.self_attention.key.out_features, r)
+            layers_to_replace[f"{name}.self_attention.value"] = LoRALayer(module.self_attention.value.in_features, module.self_attention.value.out_features, r)
+
+    # Now, replace the collected layers
+    for name, new_layer in layers_to_replace.items():
+        # Navigate to the last attribute in the path to properly set the new module
+        path = name.split('.')
+        parent_module = bert_model
+        for attr in path[:-1]:
+            parent_module = getattr(parent_module, attr)
+        setattr(parent_module, path[-1], new_layer)
 
     return bert_model
 ###

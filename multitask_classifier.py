@@ -153,7 +153,12 @@ def train_multitask(args):
     look at test_multitask below to see how you can use the custom torch `Dataset`s
     in datasets.py to load in examples from the Quora and SemEval datasets.
     '''
-    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    device = torch.device('cpu')
+    if args.use_gpu:
+        if torch.cuda.is_available():
+            device = torch.device('cuda')
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -182,11 +187,23 @@ def train_multitask(args):
     optimizer = AdamW(model.parameters(), lr=lr)
     best_dev_acc = 0
 
+
+    if args.amp:
+        print("\nTurning on Multi-Precision Training...\n")
+        print(device.type)
+        if device.type == 'mps':
+            print("\nMPS Device Detected! Deactivating AMP (incompatible).\n")
+            args.amp = False
+    if args.amp: # and device is not mps
+        gradscaler = torch.GradScaler()
+
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0
         num_batches = 0
+
+        print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
         for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
             b_ids, b_mask, b_labels = (batch['token_ids'],
                                        batch['attention_mask'], batch['labels'])
@@ -196,11 +213,20 @@ def train_multitask(args):
             b_labels = b_labels.to(device)
 
             optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
-            loss.backward()
-            optimizer.step()
+            if args.amp:   # auto multi-precision
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                    logits = model.predict_sentiment(b_ids, b_mask)
+                    loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+                gradscaler.scale(loss).backward()
+                gradscaler.step(optimizer)
+                gradscaler.update()
+            else:    # vanilla 
+                logits = model.predict_sentiment(b_ids, b_mask)
+                loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
 
             train_loss += loss.item()
             num_batches += 1
@@ -307,6 +333,10 @@ def test_multitask(args):
 
 def get_args():
     parser = argparse.ArgumentParser()
+
+    # multi-precision tuning
+    parser.add_argument("--amp",  action='store_true', help='Turn on auto multi-precision for training with bfloat16')
+
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
     parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
     parser.add_argument("--sst_test", type=str, default="data/ids-sst-test-student.csv")

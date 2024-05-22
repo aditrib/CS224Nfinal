@@ -159,6 +159,8 @@ def train_multitask(args):
             device = torch.device('cuda')
         elif torch.backends.mps.is_available():
             device = torch.device('mps')
+
+    print(f"Device Set: {device}\n")
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
     sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
@@ -190,7 +192,6 @@ def train_multitask(args):
 
     if args.amp:
         print("\nTurning on Multi-Precision Training...\n")
-        print(device.type)
         if device.type == 'mps':
             print("\nMPS Device Detected! Deactivating AMP (incompatible).\n")
             args.amp = False
@@ -207,7 +208,6 @@ def train_multitask(args):
         for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
             b_ids, b_mask, b_labels = (batch['token_ids'],
                                        batch['attention_mask'], batch['labels'])
-
             b_ids = b_ids.to(device)
             b_mask = b_mask.to(device)
             b_labels = b_labels.to(device)
@@ -215,8 +215,10 @@ def train_multitask(args):
             optimizer.zero_grad()
 
             if args.amp:   # auto multi-precision
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+
                     logits = model.predict_sentiment(b_ids, b_mask)
+                    #print(logits.dtype)
                     loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
                 gradscaler.scale(loss).backward()
@@ -284,12 +286,16 @@ def test_multitask(args):
                                          collate_fn=sts_test_data.collate_fn)
         sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
                                         collate_fn=sts_dev_data.collate_fn)
+        
+        print(f"\n============= Evaluating Dev Scores (SST, Para, STS) =============\n")
 
         dev_sentiment_accuracy,dev_sst_y_pred, dev_sst_sent_ids, \
             dev_paraphrase_accuracy, dev_para_y_pred, dev_para_sent_ids, \
             dev_sts_corr, dev_sts_y_pred, dev_sts_sent_ids = model_eval_multitask(sst_dev_dataloader,
                                                                     para_dev_dataloader,
                                                                     sts_dev_dataloader, model, device)
+        
+        print(f"\n============= Evaluating Test Scores (SST, Para, STS) =============\n")
 
         test_sst_y_pred, \
             test_sst_sent_ids, test_para_y_pred, test_para_sent_ids, test_sts_y_pred, test_sts_sent_ids = \

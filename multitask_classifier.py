@@ -32,7 +32,9 @@ from datasets import (
     load_multitask_data
 )
 
-from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask
+from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask, get_leaderboard_score
+
+import warnings
 
 
 TQDM_DISABLE=False
@@ -77,6 +79,7 @@ class MultitaskBERT(nn.Module):
         self.paraphrase_linear = nn.Linear(BERT_HIDDEN_SIZE, 1)
         self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE+1, 1)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+        self.relu = nn.ReLU()
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -142,7 +145,7 @@ def save_model(model, optimizer, args, config, filepath):
     }
 
     torch.save(save_info, filepath)
-    print(f"save the model to {filepath}")
+    print(f"Saved the model to {filepath}!")
 
 
 def train_multitask(args):
@@ -163,7 +166,7 @@ def train_multitask(args):
     print(f"Device Set: {device}\n")
     # Create the data and its corresponding datasets and dataloader.
     sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
+    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='dev')
 
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
@@ -205,9 +208,9 @@ def train_multitask(args):
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
-    best_dev_acc = 0
+    best_leaderboard_score = 0   # track leaderboard dev performance
 
-
+    # ===== AMP =====
     if args.amp:
         print("\nTurning on Multi-Precision Training...\n")
         if device.type == 'mps':
@@ -216,172 +219,188 @@ def train_multitask(args):
     if args.amp: # and device is not mps
         gradscaler = torch.GradScaler()
 
+    # ==== Datasets to Train Against ====
+    if not any([args.train_sst, args.train_quora, args.train_sts]):
+        raise Exception("No datasets specified to train against! Pass --train_sst, --train_quora, --train_sts, or any combo to train the model.")
+    #if not args.train_sst:
+    #    warnings.warn("Model checkpointing currently only supported on SST. Training will not checkpoint your model!! Pass --train_sst.\n")
+
+
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()   # put model in training mode
 
+        if args.train_sst:
+            print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
+            sst_train_loss = 0
+            sst_num_batches = 0
 
-        print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
-        sst_train_loss = 0
-        sst_num_batches = 0
+            for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                b_ids, b_mask, b_labels = (batch['token_ids'],
+                                        batch['attention_mask'], batch['labels'])
+                b_ids = b_ids.to(device)
+                b_mask = b_mask.to(device)
+                b_labels = b_labels.to(device)
 
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
+                optimizer.zero_grad()
 
-            optimizer.zero_grad()
+                if args.amp:   # auto multi-precision
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
 
-            if args.amp:   # auto multi-precision
-                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+                        logits = model.predict_sentiment(b_ids, b_mask)
+                        #print(logits.dtype)
+                        loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(optimizer)
+                    gradscaler.update()
+                else:    # vanilla 
                     logits = model.predict_sentiment(b_ids, b_mask)
-                    #print(logits.dtype)
                     loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+                    loss.backward()
+                    optimizer.step()
 
-                gradscaler.scale(loss).backward()
-                gradscaler.step(optimizer)
-                gradscaler.update()
-            else:    # vanilla 
-                logits = model.predict_sentiment(b_ids, b_mask)
-                loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-                loss.backward()
-                optimizer.step()
+                sst_train_loss += loss.item()
+                sst_num_batches += 1
 
-            sst_train_loss += loss.item()
-            sst_num_batches += 1
+            sst_train_loss = sst_train_loss / (sst_num_batches)
 
-        sst_train_loss = sst_train_loss / (sst_num_batches)
+        if args.train_quora:
+            print(f"\n================== Training Quora (Epoch {epoch}) ==================\n")
+            para_train_loss = 0
+            para_num_batches = 0
 
-
-
-        print(f"\n================== Training Quora (Epoch {epoch}) ==================\n")
-        para_train_loss = 0
-        para_num_batches = 0
-
-        for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            (b_ids1, b_mask1,
-            b_ids2, b_mask2,
-            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
-                        batch['token_ids_2'], batch['attention_mask_2'],
-                        batch['labels'], batch['sent_ids'])
+            for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1,
+                b_ids2, b_mask2,
+                b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                            batch['token_ids_2'], batch['attention_mask_2'],
+                            batch['labels'], batch['sent_ids'])
 
 
-            b_ids1 = b_ids1.to(device)
-            b_mask1 = b_mask1.to(device)
-            b_ids2 = b_ids2.to(device)
-            b_mask2 = b_mask2.to(device)
-            b_labels = b_labels.to(device)
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
 
-            optimizer.zero_grad()
+                optimizer.zero_grad()
 
-            if args.amp:   # auto multi-precision
-                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+                if args.amp:   # auto multi-precision
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
 
-                    logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-                    b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
+                        logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
+                        b_labels = b_labels.flatten().float()   # reshape to match logits
+                        # Binary CE Loss for probs vs. labels
+                        criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                        loss = criterion(logits, b_labels)
+
+                        # (less stable) 
+                        # probs = torch.sigmoid(logits)  # squeeze to probabilities
+                        # F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size  
+
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(optimizer)
+                    gradscaler.update()
+                else:    # vanilla 
+                    logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
+                    b_labels = b_labels.flatten().float()   # reshape to match logits
                     # Binary CE Loss for probs vs. labels
                     criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
                     loss = criterion(logits, b_labels)
+                    loss.backward()
+                    optimizer.step()
 
-                    # (less stable) 
-                    # probs = torch.sigmoid(logits)  # squeeze to probabilities
-                    # F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size  
+                para_train_loss += loss.item()
+                para_num_batches += 1
 
-                gradscaler.scale(loss).backward()
-                gradscaler.step(optimizer)
-                gradscaler.update()
-            else:    # vanilla 
-                logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-                b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
-                # Binary CE Loss for probs vs. labels
-                criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
-                loss = criterion(logits, b_labels)
-                loss.backward()
-                optimizer.step()
+            para_train_loss = para_train_loss / (para_num_batches)
 
-            para_train_loss += loss.item()
-            para_num_batches += 1
+        if args.train_sts:
+            print(f"\n================== Training STS (Epoch {epoch}) ==================\n")
+            sts_train_loss = 0
+            sts_num_batches = 0
 
-        para_train_loss = para_train_loss / (para_num_batches)
+            for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1,
+                b_ids2, b_mask2,
+                b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                            batch['token_ids_2'], batch['attention_mask_2'],
+                            batch['labels'], batch['sent_ids'])
 
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
 
+                optimizer.zero_grad()
 
-        print(f"\n================== Training STS (Epoch {epoch}) ==================\n")
-        sts_train_loss = 0
-        sts_num_batches = 0
+                if args.amp:   # auto multi-precision
+                    with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+                        logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten() 
+                        b_labels = b_labels.flatten().float()   # reshape to match logits
+                        criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
+                        loss = criterion(logits, b_labels)
 
-        for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            (b_ids1, b_mask1,
-            b_ids2, b_mask2,
-            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
-                        batch['token_ids_2'], batch['attention_mask_2'],
-                        batch['labels'], batch['sent_ids'])
-
-            b_ids1 = b_ids1.to(device)
-            b_mask1 = b_mask1.to(device)
-            b_ids2 = b_ids2.to(device)
-            b_mask2 = b_mask2.to(device)
-            b_labels = b_labels.to(device)
-
-            optimizer.zero_grad()
-
-            if args.amp:   # auto multi-precision
-                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
-
-                    logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-                    b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
-                    # Binary CE Loss for probs vs. labels
-                    criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(optimizer)
+                    gradscaler.update()
+                else:    # vanilla 
+                    logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()  
+                    b_labels = b_labels.flatten().float()   # reshape to match logits
+                    criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
                     loss = criterion(logits, b_labels)
+                    loss.backward()
+                    optimizer.step()
 
-                gradscaler.scale(loss).backward()
-                gradscaler.step(optimizer)
-                gradscaler.update()
-            else:    # vanilla 
-                logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-                b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
-                # Binary CE Loss for probs vs. labels
-                criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
-                loss = criterion(logits, b_labels)
-                loss.backward()
-                optimizer.step()
+                    #print(logits[0])
+                    #print(b_labels[0])
+                    #print(loss.item())
 
-            sts_train_loss += loss.item()
-            sts_num_batches += 1
+                sts_train_loss += loss.item()
+                sts_num_batches += 1
 
-        sts_train_loss = sts_train_loss / (sts_num_batches)
-
+            sts_train_loss = sts_train_loss / (sts_num_batches)
 
         print(f"\n============== End of Epoch Evaluation ==============")
 
         # ====== Compute SST Accs ========
         print(f"Epoch {epoch}\n")
-        sst_train_acc, sst_train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        sst_dev_acc, sst_dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
 
-        if sst_dev_acc > best_dev_acc:    # TODO: come up with more clever checkpointing than just caring about SST
-            best_dev_acc = sst_dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
+        if args.train_sst:
+            sst_train_acc, sst_train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+            sst_dev_acc, sst_dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
 
         # ====== Compute Quora Accs ======
-        para_train_acc, para_train_f1, *_ = model_eval_para(para_train_dataloader, model, device)
-        para_dev_acc, para_dev_f1, *_ = model_eval_para(para_dev_dataloader, model, device)
-
-        #if para_dev_acc > best_dev_acc:    # TODO: come up with more clever checkpointing than just caring about SST
-        #    best_dev_acc = para_dev_acc
-        #    save_model(model, optimizer, args, config, args.filepath)
+        if args.train_quora and args.quora_epoch_eval:   # extremely costly 
+            para_train_acc, para_train_f1, *_ = model_eval_para(para_train_dataloader, model, device)
+            para_dev_acc, para_dev_f1, *_ = model_eval_para(para_dev_dataloader, model, device)
 
         # ====== Compute STS Accs =======
-        sts_train_corr, *_ = model_eval_sts(sts_train_dataloader, model, device)
-        sts_dev_corr, *_ = model_eval_sts(sts_dev_dataloader, model, device)
+        if args.train_sts:
+            sts_train_corr, *_ = model_eval_sts(sts_train_dataloader, model, device)
+            sts_dev_corr, *_ = model_eval_sts(sts_dev_dataloader, model, device)
 
-
-        print(f"SST—— train loss :: {sst_train_loss :.3f}, train acc :: {sst_train_acc :.3f}, dev acc :: {sst_dev_acc :.3f}")
+        if args.train_sst:
+            print(f"SST—— train loss :: {sst_train_loss :.3f}, train acc :: {sst_train_acc :.3f}, dev acc :: {sst_dev_acc :.3f}")
+        if args.train_quora and args.quora_epoch_eval:
+            print(f"Para—— train loss :: {para_train_loss :.3f}, train acc :: {para_train_acc :.3f}, dev acc :: {para_dev_acc :.3f}")
+        else:
+            print(f"Skipping Quora Eval until the end (costly compute)")
+        if args.train_sts:
+            print(f"STS—— train loss :: {sts_train_loss :.3f}, train corr :: {sts_train_corr :.3f}, dev corr :: {sts_dev_corr :.3f}")
 
             
+        print(f"================ Checkpointing =============")
+        # ===== Checkpointing ====
+        dev_leaderboard_score = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, 
+                                                      para_dev_acc if args.train_quora else 0, 
+                                                      sts_dev_corr if args.train_sts else 0)
+        if dev_leaderboard_score > best_leaderboard_score:    # TODO: come up with more clever checkpointing than just caring about SST
+            best_leaderboard_score = dev_leaderboard_score
+            print("Overall (leaderboard) performance improved!")
+            save_model(model, optimizer, args, config, args.filepath)
 
 
 
@@ -491,6 +510,12 @@ def get_args():
 
     # multi-precision tuning
     parser.add_argument("--amp",  action='store_true', help='Turn on auto multi-precision for training with bfloat16')
+
+    # dataset selections for training
+    parser.add_argument("--train_sst", action='store_true', help='Train against SST sentiment dataset (CELoss)')
+    parser.add_argument("--train_quora", action='store_true', help='Train against Quora paraphrase dataset (BCELoss) (costly!)')
+    parser.add_argument("--train_sts", action='store_true', help='Train against STS similarity dataset (BCELoss)')
+    parser.add_argument("--quora_epoch_eval", action='store_true', help='Evaluate quora performance every epoch (Costly!!)')
 
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
     parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")

@@ -15,6 +15,16 @@ import numpy as np
 
 TQDM_DISABLE = False
 
+def get_leaderboard_score(sst_acc: float = 0, 
+                      para_acc: float = 0, 
+                      sts_corr: float = 0):
+    """
+    Compute the leaderboard avg. score. Useful for checkpointing.
+
+    add 0.5 to correlation to scale between 0 and 1
+    """
+    return np.mean([sst_acc, para_acc, 0.5*sts_corr + 0.5])
+
 
 # Evaluate multitask model on SST only.
 def model_eval_sst(dataloader, model, device):
@@ -64,8 +74,8 @@ def model_eval_para(dataloader, model, device):
         b_mask2 = b_mask2.to(device)
 
         logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-        y_hat = logits.sigmoid().round().flatten().cpu().numpy()
-        b_labels = b_labels.flatten().cpu().numpy()
+        y_hat = logits.sigmoid().round().flatten().detach().cpu().numpy()
+        b_labels = b_labels.flatten().detach().cpu().numpy()
 
         para_y_pred.extend(y_hat)
         para_y_true.extend(b_labels)
@@ -96,8 +106,8 @@ def model_eval_sts(dataloader, model, device):
         b_mask2 = b_mask2.to(device)
 
         logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-        y_hat = logits.flatten().cpu().numpy()
-        b_labels = b_labels.flatten().cpu().numpy()
+        y_hat = logits.flatten().detach().cpu().numpy()
+        b_labels = b_labels.flatten().detach().cpu().numpy()
 
         sts_y_pred.extend(y_hat)
         sts_y_true.extend(b_labels)

@@ -245,7 +245,7 @@ if __name__ == "__main__":
     print('Total time:', end_time - start_time)
 
     print('Evaluating on SST...')
-        dev_acc = test(config)
+    dev_acc = test(config)
 
     # Save file with total time and lora_r
     with open(f'predictions/{args.fine_tune_mode}-LoRA-{args.lora_r}_all_layers_attn_only_sst-time.txt', 'w') as f:

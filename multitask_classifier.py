@@ -281,20 +281,24 @@ def train_multitask(args):
                 with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
 
                     logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-                    probs = torch.sigmoid(logits)  # squeeze to probabilities
                     b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
                     # Binary CE Loss for probs vs. labels
-                    loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                    criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                    loss = criterion(logits, b_labels)
+
+                    # (less stable) 
+                    # probs = torch.sigmoid(logits)  # squeeze to probabilities
+                    # F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size  
 
                 gradscaler.scale(loss).backward()
                 gradscaler.step(optimizer)
                 gradscaler.update()
             else:    # vanilla 
                 logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
-                probs = torch.sigmoid(logits)  # squeeze to probabilities
                 b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
                 # Binary CE Loss for probs vs. labels
-                loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                loss = criterion(logits, b_labels)
                 loss.backward()
                 optimizer.step()
 
@@ -328,20 +332,20 @@ def train_multitask(args):
                 with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
 
                     logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-                    probs = torch.sigmoid(logits)  # squeeze to probabilities
                     b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
                     # Binary CE Loss for probs vs. labels
-                    loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                    criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                    loss = criterion(logits, b_labels)
 
                 gradscaler.scale(loss).backward()
                 gradscaler.step(optimizer)
                 gradscaler.update()
             else:    # vanilla 
                 logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
-                probs = torch.sigmoid(logits)  # squeeze to probabilities
                 b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
                 # Binary CE Loss for probs vs. labels
-                loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                criterion = torch.nn.BCEWithLogitsLoss()   # more stable, can autocast
+                loss = criterion(logits, b_labels)
                 loss.backward()
                 optimizer.step()
 

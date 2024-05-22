@@ -32,7 +32,7 @@ from datasets import (
     load_multitask_data
 )
 
-from evaluation import model_eval_sst, model_eval_multitask, model_eval_test_multitask
+from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask
 
 
 TQDM_DISABLE=False
@@ -172,6 +172,24 @@ def train_multitask(args):
                                       collate_fn=sst_train_data.collate_fn)
     sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
                                     collate_fn=sst_dev_data.collate_fn)
+    
+    para_train_data = SentencePairDataset(para_train_data, args)
+    para_dev_data = SentencePairDataset(para_dev_data, args)
+
+    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size,
+                                    collate_fn=para_train_data.collate_fn)
+    para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=para_dev_data.collate_fn)
+
+    sts_train_data = SentencePairDataset(sts_train_data, args)
+    sts_dev_data = SentencePairDataset(sts_dev_data, args, isRegression=True)
+
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size,
+                                    collate_fn=sts_train_data.collate_fn)
+    sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size,
+                                    collate_fn=sts_dev_data.collate_fn)
+    
+    
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
@@ -200,11 +218,13 @@ def train_multitask(args):
 
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
-        model.train()
-        train_loss = 0
-        num_batches = 0
+        model.train()   # put model in training mode
+
 
         print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
+        sst_train_loss = 0
+        sst_num_batches = 0
+
         for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
             b_ids, b_mask, b_labels = (batch['token_ids'],
                                        batch['attention_mask'], batch['labels'])
@@ -230,21 +250,135 @@ def train_multitask(args):
                 loss.backward()
                 optimizer.step()
 
-            train_loss += loss.item()
-            num_batches += 1
+            sst_train_loss += loss.item()
+            sst_num_batches += 1
 
-        train_loss = train_loss / (num_batches)
+        sst_train_loss = sst_train_loss / (sst_num_batches)
 
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
 
-        if dev_acc > best_dev_acc:
-            best_dev_acc = dev_acc
+
+        print(f"\n================== Training Quora (Epoch {epoch}) ==================\n")
+        para_train_loss = 0
+        para_num_batches = 0
+
+        for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            (b_ids1, b_mask1,
+            b_ids2, b_mask2,
+            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                        batch['token_ids_2'], batch['attention_mask_2'],
+                        batch['labels'], batch['sent_ids'])
+
+
+            b_ids1 = b_ids1.to(device)
+            b_mask1 = b_mask1.to(device)
+            b_ids2 = b_ids2.to(device)
+            b_mask2 = b_mask2.to(device)
+            b_labels = b_labels.to(device)
+
+            optimizer.zero_grad()
+
+            if args.amp:   # auto multi-precision
+                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+
+                    logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+                    probs = torch.sigmoid(logits)  # squeeze to probabilities
+                    b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
+                    # Binary CE Loss for probs vs. labels
+                    loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+
+                gradscaler.scale(loss).backward()
+                gradscaler.step(optimizer)
+                gradscaler.update()
+            else:    # vanilla 
+                logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2)
+                probs = torch.sigmoid(logits)  # squeeze to probabilities
+                b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
+                # Binary CE Loss for probs vs. labels
+                loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
+
+            para_train_loss += loss.item()
+            para_num_batches += 1
+
+        para_train_loss = para_train_loss / (para_num_batches)
+
+
+
+        print(f"\n================== Training STS (Epoch {epoch}) ==================\n")
+        sts_train_loss = 0
+        sts_num_batches = 0
+
+        for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            (b_ids1, b_mask1,
+            b_ids2, b_mask2,
+            b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],
+                        batch['token_ids_2'], batch['attention_mask_2'],
+                        batch['labels'], batch['sent_ids'])
+
+            b_ids1 = b_ids1.to(device)
+            b_mask1 = b_mask1.to(device)
+            b_ids2 = b_ids2.to(device)
+            b_mask2 = b_mask2.to(device)
+            b_labels = b_labels.to(device)
+
+            optimizer.zero_grad()
+
+            if args.amp:   # auto multi-precision
+                with torch.autocast(device_type=device.type, dtype=torch.float16, cache_enabled = True):
+
+                    logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+                    probs = torch.sigmoid(logits)  # squeeze to probabilities
+                    b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
+                    # Binary CE Loss for probs vs. labels
+                    loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+
+                gradscaler.scale(loss).backward()
+                gradscaler.step(optimizer)
+                gradscaler.update()
+            else:    # vanilla 
+                logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2)
+                probs = torch.sigmoid(logits)  # squeeze to probabilities
+                b_labels = b_labels.view(-1, 1).float()   # reshape to match logits
+                # Binary CE Loss for probs vs. labels
+                loss = F.binary_cross_entropy(probs, b_labels, reduction='sum') / args.batch_size
+                loss.backward()
+                optimizer.step()
+
+            sts_train_loss += loss.item()
+            sts_num_batches += 1
+
+        sts_train_loss = sts_train_loss / (sts_num_batches)
+
+
+        print(f"\n============== End of Epoch Evaluation ==============")
+
+        # ====== Compute SST Accs ========
+        print(f"Epoch {epoch}\n")
+        sst_train_acc, sst_train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
+        sst_dev_acc, sst_dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+
+        if sst_dev_acc > best_dev_acc:    # TODO: come up with more clever checkpointing than just caring about SST
+            best_dev_acc = sst_dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
-        # TODO: Train on Quora and STS datasets
+        # ====== Compute Quora Accs ======
+        para_train_acc, para_train_f1, *_ = model_eval_para(para_train_dataloader, model, device)
+        para_dev_acc, para_dev_f1, *_ = model_eval_para(para_dev_dataloader, model, device)
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        #if para_dev_acc > best_dev_acc:    # TODO: come up with more clever checkpointing than just caring about SST
+        #    best_dev_acc = para_dev_acc
+        #    save_model(model, optimizer, args, config, args.filepath)
+
+        # ====== Compute STS Accs =======
+        sts_train_corr, *_ = model_eval_sts(sts_train_dataloader, model, device)
+        sts_dev_corr, *_ = model_eval_sts(sts_dev_dataloader, model, device)
+
+
+        print(f"SST—— train loss :: {sst_train_loss :.3f}, train acc :: {sst_train_acc :.3f}, dev acc :: {sst_dev_acc :.3f}")
+
+            
+
 
 
 def test_multitask(args):

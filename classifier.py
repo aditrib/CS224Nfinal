@@ -12,6 +12,8 @@ from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 
+import time
+
 
 TQDM_DISABLE=False
 

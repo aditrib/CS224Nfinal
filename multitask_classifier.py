@@ -433,7 +433,9 @@ def train_multitask(args):
 
         print(f"================ Checkpointing =============")
         # ===== Checkpointing ====
-        dev_leaderboard_score = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, para_dev_acc if args.train_quora else 0, sts_dev_corr if args.train_sts else 0)
+        dev_leaderboard_score = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, 
+                                            para_dev_acc if args.train_quora and args.quora_epoch_eval else 0, 
+                                            sts_dev_corr if args.train_sts else 0)
         if dev_leaderboard_score > best_leaderboard_score:  # TODO: come up with more clever checkpointing than just caring about SST
             best_leaderboard_score = dev_leaderboard_score
             print(f"New Best Leaderboard Avg. Score: {best_leaderboard_score:.3f}!")

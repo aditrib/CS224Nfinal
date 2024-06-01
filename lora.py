@@ -19,50 +19,6 @@ import time
 
 TQDM_DISABLE=False
 
-
-class BertSentimentClassifier(torch.nn.Module):
-    '''
-    This module performs sentiment classification using BERT embeddings on the SST dataset.
-
-    In the SST dataset, there are 5 sentiment categories (from 0 - "negative" to 4 - "positive").
-    Thus, your forward() should return one logit for each of the 5 classes.
-    '''
-    def __init__(self, config, r):
-        super(BertSentimentClassifier, self).__init__()
-        self.num_labels = config.num_labels
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
-        ### Apply LoRA self-attention layers to the BERT model.
-        self.bert = replace_attention_layers(self.bert, r)
-        ###
-
-        # Pretrain mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
-        for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-linear-layer':
-                param.requires_grad = False
-            elif config.fine_tune_mode == 'full-model':
-                param.requires_grad = True
-
-        # Create any instance variables you need to classify the sentiment of BERT embeddings.
-        self.linear = torch.nn.Linear(config.hidden_size, config.num_labels)
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-
-        return
-
-
-    def forward(self, input_ids, attention_mask):
-        '''Takes a batch of sentences and returns logits for sentiment classes'''
-        # The final BERT contextualized embedding is the hidden state of [CLS] token (the first token).
-        # HINT: You should consider what is an appropriate return value given that
-        # the training loop currently uses F.cross_entropy as the loss function.
-        ### 
-
-        bert_out = self.bert(input_ids, attention_mask)
-        pooler_out = bert_out['pooler_output']   # (N, D)  (the embeddings of the [CLS] (first) token, 'embeds[:, 0, :]')
-        out = self.linear(self.dropout(pooler_out))
-
-        return out
-
 ### NEW FUNCTION BELOW    
 # Replace the self-attention layers in the BERT model with LoRA self-attention layers.
 def replace_attention_layers(bert_model, r):

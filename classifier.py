@@ -48,6 +48,7 @@ class BertSentimentClassifier(torch.nn.Module):
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
         assert config.lora_dict['mode'] in ['none', 'attn', 'attn-only', 'all-lin', 'all-lin-only']
         assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
+        assert config.lora_dict['dora'] in [0, 1]
         # LoRA settings
         if config.fine_tune_mode != 'full-model' and config.lora_dict['mode'] != 'none':
             raise ValueError("LoRA can only be used in full-model fine-tuning mode.")
@@ -60,7 +61,7 @@ class BertSentimentClassifier(torch.nn.Module):
                 param.requires_grad = True
         
         if config.lora_dict['mode'] != 'none':
-            self.bert = inject_lora(self.bert, config.lora_dict['mode'], config.lora_dict['r'])
+            self.bert = inject_lora(self.bert, config.lora_dict['mode'], config.lora_dict['r'], config.lora_dict['dora'])
 
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
         self.linear = torch.nn.Linear(config.hidden_size, config.num_labels)
@@ -374,7 +375,7 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-3)
-    parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0}')
+    parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
     parser.add_argument("--dataset", type=str, help="sst or cfimdb or both", default='both')
     parser.add_argument("--filepath", type=str, help="file to save results", default='benchmark-results.csv')
 

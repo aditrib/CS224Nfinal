@@ -13,6 +13,7 @@ from optimizer import AdamW
 from tqdm import tqdm
 
 import os
+import json
 import pandas as pd
 from lora_bert import inject_lora
 import time
@@ -64,9 +65,6 @@ class BertSentimentClassifier(torch.nn.Module):
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
         self.linear = torch.nn.Linear(config.hidden_size, config.num_labels)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-
-        return
-
 
     def forward(self, input_ids, attention_mask):
         '''Takes a batch of sentences and returns logits for sentiment classes'''
@@ -376,11 +374,12 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-3)
-    parser.add_argument("--lora_dict", type=dict, default={'mode': 'none', 'r': 0})
+    parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0}')
     parser.add_argument("--dataset", type=str, help="sst or cfimdb or both", default='both')
     parser.add_argument("--filepath", type=str, help="file to save results", default='benchmark-results.csv')
 
     args = parser.parse_args()
+    args.lora_dict = json.loads(args.lora_dict)
     return args
 
 

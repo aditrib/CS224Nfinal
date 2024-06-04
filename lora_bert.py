@@ -31,16 +31,15 @@ class LoRALinear(nn.Module):
     def forward(self, x):
         original_output = self.original_linear(x)
         if self.lora_A is not None and self.lora_B is not None:
-            lora_update = self.lora_B(self.lora_A(x))
             if self.dora:
-                updated_weights = self.original_linear.weight + lora_update
+                lora_weights = self.lora_B.weight @ self.lora_A.weight
+                updated_weights = self.original_linear.weight + lora_weights
                 norms = updated_weights.norm(p=2, dim=0, keepdim=True)
-                directional_component = updated_weights / norms
-                adjusted_weights = self.magnitude.unsqueeze(0) * directional_component
-
-                # Perform the final linear operation with adjusted weights
-                return F.linear(x, adjusted_weights, self.original_linear.bias)
+                direction = updated_weights / norms
+                scaled_weights = self.magnitude * direction
+                return F.linear(x, scaled_weights, self.original_linear.bias)
             else:
+                lora_update = self.lora_B(self.lora_A(x))
                 return original_output + lora_update
         else:
             return original_output

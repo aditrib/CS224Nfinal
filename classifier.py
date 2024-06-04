@@ -12,6 +12,12 @@ from bert import BertModel
 from optimizer import AdamW
 from tqdm import tqdm
 
+import os
+import json
+import pandas as pd
+from lora_bert import inject_lora
+import time
+
 
 TQDM_DISABLE=False
 
@@ -39,20 +45,27 @@ class BertSentimentClassifier(torch.nn.Module):
         self.num_labels = config.num_labels
         self.bert = BertModel.from_pretrained('bert-base-uncased')
 
-        # Pretrain mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
+        assert config.lora_dict['mode'] in ['none', 'attn', 'attn-only', 'all-lin', 'all-lin-only']
+        assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
+        assert config.lora_dict['dora'] in [0, 1]
+        # LoRA settings
+        if config.fine_tune_mode != 'full-model' and config.lora_dict['mode'] != 'none':
+            raise ValueError("LoRA can only be used in full-model fine-tuning mode.")
+        
+        # Pretrain mode does not require updating BERT parameters.
         for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-linear-layer':
+            if config.fine_tune_mode == 'last-linear-layer' or config.lora_dict['mode'] in ['attn-only', 'all-lin-only']:
                 param.requires_grad = False
             elif config.fine_tune_mode == 'full-model':
                 param.requires_grad = True
+        
+        if config.lora_dict['mode'] != 'none':
+            self.bert = inject_lora(self.bert, config.lora_dict['mode'], config.lora_dict['r'], config.lora_dict['dora'])
 
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
         self.linear = torch.nn.Linear(config.hidden_size, config.num_labels)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-
-        return
-
 
     def forward(self, input_ids, attention_mask):
         '''Takes a batch of sentences and returns logits for sentiment classes'''
@@ -262,7 +275,8 @@ def train(args):
               'num_labels': num_labels,
               'hidden_size': 768,
               'data_dir': '.',
-              'fine_tune_mode': args.fine_tune_mode}
+              'fine_tune_mode': args.fine_tune_mode,
+              'lora_dict': args.lora_dict}
 
     config = SimpleNamespace(**config)
 
@@ -345,6 +359,7 @@ def test(args):
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s  in zip(test_sent_ids,test_pred ):
                 f.write(f"{p} , {s} \n")
+    return dev_acc
 
 
 def get_args():
@@ -360,8 +375,12 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
                         default=1e-3)
+    parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
+    parser.add_argument("--dataset", type=str, help="sst or cfimdb or both", default='both')
+    parser.add_argument("--filepath", type=str, help="file to save results", default='benchmark-results.csv')
 
     args = parser.parse_args()
+    args.lora_dict = json.loads(args.lora_dict)
     return args
 
 
@@ -369,44 +388,80 @@ if __name__ == "__main__":
     args = get_args()
     seed_everything(args.seed)
 
-    print('Training Sentiment Classifier on SST...')
-    config = SimpleNamespace(
-        filepath='sst-classifier.pt',
-        lr=args.lr,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-sst-train.csv',
-        dev='data/ids-sst-dev.csv',
-        test='data/ids-sst-test-student.csv',
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
-    )
+    if args.dataset == 'sst' or args.dataset == 'both':
+        print('Training Sentiment Classifier on SST...')
+        config = SimpleNamespace(
+            filepath='sst-classifier.pt',
+            lr=args.lr,
+            use_gpu=args.use_gpu,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            hidden_dropout_prob=args.hidden_dropout_prob,
+            train='data/ids-sst-train.csv',
+            dev='data/ids-sst-dev.csv',
+            test='data/ids-sst-test-student.csv',
+            fine_tune_mode=args.fine_tune_mode,
+            dev_out = 'predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
+            test_out = 'predictions/' + args.fine_tune_mode + '-sst-test-out.csv',
+            lora_dict=args.lora_dict
+        )
 
-    train(config)
+        start_time = time.time()
+        train(config)
+        end_time = time.time()
+        print('Total time:', end_time - start_time)
 
-    print('Evaluating on SST...')
-    test(config)
+        print('Evaluating on SST...')
+        dev_acc = test(config)
 
-    print('Training Sentiment Classifier on cfimdb...')
-    config = SimpleNamespace(
-        filepath='cfimdb-classifier.pt',
-        lr=args.lr,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=8,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-cfimdb-train.csv',
-        dev='data/ids-cfimdb-dev.csv',
-        test='data/ids-cfimdb-test-student.csv',
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
-    )
+        results_df = pd.DataFrame({
+            'dataset': ['sst'],
+            'time': [end_time - start_time],
+            'dev_acc': [dev_acc],
+            'lora_mode': [config.lora_dict['mode']],
+            'lora_r': [config.lora_dict['r']],
+            'lr': [config.lr],
+            'batch_size': [config.batch_size],
+            'epochs': [config.epochs],
+            'timestamp': [time.strftime('%Y-%m-%d %H:%M:%S')]
+        })
 
-    train(config)
+        results_file = args.filepath
 
-    print('Evaluating on cfimdb...')
-    test(config)
+        if os.path.exists(results_file):
+            # If the file exists, append without header
+            results_df.to_csv(results_file, mode='a', header=False, index=False)
+        else:
+            # Otherwise, create a new file with header
+            results_df.to_csv(results_file, mode='w', header=True, index=False)
+
+
+    if args.dataset == 'cfimdb' or args.dataset == 'both':
+        print('Training Sentiment Classifier on cfimdb...')
+        config = SimpleNamespace(
+            filepath='cfimdb-classifier.pt',
+            lr=args.lr,
+            use_gpu=args.use_gpu,
+            epochs=args.epochs,
+            batch_size=8,
+            hidden_dropout_prob=args.hidden_dropout_prob,
+            train='data/ids-cfimdb-train.csv',
+            dev='data/ids-cfimdb-dev.csv',
+            test='data/ids-cfimdb-test-student.csv',
+            fine_tune_mode=args.fine_tune_mode,
+            dev_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
+            test_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
+        )
+
+        start_time = time.time()
+        train(config)
+        end_time = time.time()
+        print('Total time:', end_time - start_time)
+
+        print('Evaluating on cfimdb...')
+        dev_acc = test(config)
+
+        # Save file with total time and lora_r
+        with open(f'predictions/{args.fine_tune_mode}-cfimdb-time.txt', 'w') as f:
+            f.write(f'Total time: {end_time - start_time} \n')
+            f.write(f'dev_acc: {dev_acc}')

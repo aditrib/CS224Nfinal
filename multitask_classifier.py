@@ -73,8 +73,8 @@ class MultitaskBERT(nn.Module):
     def __init__(self, config):
         super(MultitaskBERT, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
-        # last-linear-layer mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
+        # last-layer mode does not require updating BERT paramters.
+        assert config.fine_tune_mode in ["last-layer", "full-model"]
         assert config.lora_dict['mode'] in ['none', 'attn', 'attn-only', 'all-lin', 'all-lin-only']
         assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
         assert config.lora_dict['dora'] in [0, 1]
@@ -84,7 +84,7 @@ class MultitaskBERT(nn.Module):
         
         # Pretrain mode does not require updating BERT parameters.
         for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-linear-layer' or config.lora_dict['mode'] in ['attn-only', 'all-lin-only']:
+            if config.fine_tune_mode == 'last-layer' or config.lora_dict['mode'] in ['attn-only', 'all-lin-only']:
                 param.requires_grad = False
             elif config.fine_tune_mode == 'full-model':
                 param.requires_grad = True
@@ -654,7 +654,7 @@ def get_args():
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
 
     parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
-    parser.add_argument("--benchmark-results", type=str, default="benchmark-results.csv")
+    parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-last-layer.csv")
 
     args = parser.parse_args()
     args.lora_dict = json.loads(args.lora_dict)

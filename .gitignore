@@ -7,3 +7,6 @@ _pycache__/config.cpython-38.py
 __pycache__/utils.cpython-38.pyc
 *.pyc
 .zip
+*.pt
+*.pdf 
+*.zip

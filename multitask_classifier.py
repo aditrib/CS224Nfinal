@@ -552,7 +552,7 @@ def get_args():
     parser = argparse.ArgumentParser()
 
     # multi-precision tuning
-    parser.add_argument("--amp",  action='store_true', help='Turn on auto multi-precision for training with bfloat16')
+    parser.add_argument("--amp",  action='store_true', help='Turn on auto multi-precision for training with float16')
 
     # clf type (linear, nonlinear, conv)
     parser.add_argument("--clf", type=str, default="linear", 

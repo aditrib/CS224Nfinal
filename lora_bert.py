@@ -23,7 +23,7 @@ class LoRALinear(nn.Module):
             nn.init.zeros_(self.lora_B.weight)
 
             if dora:
-                self.magnitude = nn.Parameter(torch.ones(1, out_features))
+                self.magnitude = nn.Parameter(torch.ones(out_features, 1))
         else:
             self.lora_A = None
             self.lora_B = None

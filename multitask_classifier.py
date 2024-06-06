@@ -34,9 +34,14 @@ from datasets import (
 )
 
 from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask, get_leaderboard_score
+from lora_bert import inject_lora
+import time
+
 
 import warnings
 import os
+import json
+import csv
 
 
 TQDM_DISABLE=False
@@ -68,14 +73,24 @@ class MultitaskBERT(nn.Module):
     def __init__(self, config):
         super(MultitaskBERT, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
-        # last-linear-layer mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-layer",  
-                                         "full-model"]
+        # last-layer mode does not require updating BERT paramters.
+        assert config.fine_tune_mode in ["last-layer", "full-model"]
+        assert config.lora_dict['mode'] in ['none', 'attn', 'attn-only', 'all-lin', 'all-lin-only']
+        assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
+        assert config.lora_dict['dora'] in [0, 1]
+        # LoRA settings
+        if config.fine_tune_mode != 'full-model' and config.lora_dict['mode'] != 'none':
+            raise ValueError("LoRA can only be used in full-model fine-tuning mode.")
+        
+        # Pretrain mode does not require updating BERT parameters.
         for param in self.bert.parameters():
-            if config.fine_tune_mode == 'full-model':
-                param.requires_grad = True
-            else:
+            if config.fine_tune_mode == 'last-layer' or config.lora_dict['mode'] in ['attn-only', 'all-lin-only']:
                 param.requires_grad = False
+            elif config.fine_tune_mode == 'full-model':
+                param.requires_grad = True
+        
+        if config.lora_dict['mode'] != 'none':
+            self.bert = inject_lora(self.bert, config.lora_dict['mode'], config.lora_dict['r'], config.lora_dict['dora'])
 
         assert config.clf in ["linear", "nonlinear", "conv"]
         self.clf = config.clf
@@ -216,7 +231,7 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"Saved the model to {filepath}!")
 
 
-def train_multitask(args):
+def train_multitask(args, benchmark=False):
     device = torch.device('cpu')
     if args.use_gpu:
         if torch.cuda.is_available():
@@ -249,7 +264,14 @@ def train_multitask(args):
     sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size, collate_fn=sts_dev_data.collate_fn)
 
     # Initialize model
-    config = {'hidden_dropout_prob': args.hidden_dropout_prob, 'num_labels': num_labels, 'hidden_size': 768, 'data_dir': '.', 'fine_tune_mode': args.fine_tune_mode, 'clf': args.clf}
+    config = {
+        'hidden_dropout_prob': args.hidden_dropout_prob,
+        'num_labels': num_labels,
+        'hidden_size': 768,
+        'data_dir': '.',
+        'fine_tune_mode': args.fine_tune_mode,
+        'clf': args.clf,
+        'lora_dict': args.lora_dict}
     config = SimpleNamespace(**config)
     model = MultitaskBERT(config)
     model = model.to(device)
@@ -273,15 +295,26 @@ def train_multitask(args):
     if args.amp:  # and device is not mps
         gradscaler = torch.cuda.amp.GradScaler()
 
+    if benchmark:
+        total_sst_time = 0
+        total_para_time = 0
+        total_sts_time = 0
+
+        total_sst_memory = 0
+        total_para_memory = 0
+        total_sts_memory = 0
     # Train for the specified number of epochs
     for epoch in range(args.epochs):
         model.train()  # put model in training mode
 
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_sst:
             print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
             sst_train_loss = 0
             sst_num_batches = 0
-
+       
+            start_time = time.time()
             for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
                 b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
                 b_ids = b_ids.to(device)
@@ -306,14 +339,21 @@ def train_multitask(args):
 
                 sst_train_loss += loss.item()
                 sst_num_batches += 1
-
+            
+            if benchmark:
+                total_sst_time += time.time() - start_time
+                peak_memory_sst = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_sst_memory += peak_memory_sst
             sst_train_loss = sst_train_loss / sst_num_batches
-
+            
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_quora:
             print(f"\n================== Training Quora (Epoch {epoch}) ==================\n")
             para_train_loss = 0
             para_num_batches = 0
-
+            
+            start_time = time.time()
             for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
                 (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
 
@@ -346,13 +386,20 @@ def train_multitask(args):
                 para_train_loss += loss.item()
                 para_num_batches += 1
 
+            if benchmark:
+                total_para_time += time.time() - start_time
+                peak_memory_para = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_para_memory += peak_memory_para
             para_train_loss = para_train_loss / para_num_batches
-
+            
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_sts:
             print(f"\n================== Training STS (Epoch {epoch}) ==================\n")
             sts_train_loss = 0
             sts_num_batches = 0
 
+            start_time = time.time()
             for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
                 (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
 
@@ -384,7 +431,10 @@ def train_multitask(args):
 
                 sts_train_loss += loss.item()
                 sts_num_batches += 1
-
+            if benchmark:
+                total_sts_time += time.time() - start_time
+                peak_memory_sts = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_sts_memory += peak_memory_sts
             sts_train_loss = sts_train_loss / sts_num_batches
 
         print(f"\n============== End of Epoch Evaluation ==============")
@@ -443,11 +493,21 @@ def train_multitask(args):
 
         # step the learning rate scheduler (halves lr)
         scheduler.step()
-
     writer.close()
+    
+    if benchmark:
+        average_sst_time = total_sst_time / args.epochs if args.train_sst else 0
+        average_para_time = total_para_time / args.epochs if args.train_sst else 0
+        average_sts_time = total_sts_time / args.epochs if args.train_sst else 0
+        
+        average_sst_memory = total_sst_memory / args.epochs if args.train_sst else 0
+        average_para_memory = total_para_memory / args.epochs if args.train_sst else 0
+        average_sts_memory = total_sts_memory / args.epochs if args.train_sst else 0
+        return average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory
 
 
-def test_multitask(args):
+
+def test_multitask(args, benchmark=False):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
         device = torch.device('cpu')
@@ -506,46 +566,49 @@ def test_multitask(args):
                                                                     para_dev_dataloader,
                                                                     sts_dev_dataloader, model, device)
         
-        print(f"\n============= Evaluating Test Scores (SST, Para, STS) =============\n")
+        if not benchmark:
+            print(f"\n============= Evaluating Test Scores (SST, Para, STS) =============\n")
 
-        test_sst_y_pred, \
-            test_sst_sent_ids, test_para_y_pred, test_para_sent_ids, test_sts_y_pred, test_sts_sent_ids = \
-                model_eval_test_multitask(sst_test_dataloader,
-                                          para_test_dataloader,
-                                          sts_test_dataloader, model, device)
+            test_sst_y_pred, \
+                test_sst_sent_ids, test_para_y_pred, test_para_sent_ids, test_sts_y_pred, test_sts_sent_ids = \
+                    model_eval_test_multitask(sst_test_dataloader,
+                                            para_test_dataloader,
+                                            sts_test_dataloader, model, device)
 
-        with open(args.sst_dev_out, "w+") as f:
-            print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.sst_dev_out, "w+") as f:
+                print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
+                f.write(f"id \t Predicted_Sentiment \n")
+                for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        with open(args.sst_test_out, "w+") as f:
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(test_sst_sent_ids, test_sst_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.sst_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Sentiment \n")
+                for p, s in zip(test_sst_sent_ids, test_sst_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        with open(args.para_dev_out, "w+") as f:
-            print(f"dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
-            f.write(f"id \t Predicted_Is_Paraphrase \n")
-            for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.para_dev_out, "w+") as f:
+                print(f"dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
+                f.write(f"id \t Predicted_Is_Paraphrase \n")
+                for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        with open(args.para_test_out, "w+") as f:
-            f.write(f"id \t Predicted_Is_Paraphrase \n")
-            for p, s in zip(test_para_sent_ids, test_para_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.para_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Is_Paraphrase \n")
+                for p, s in zip(test_para_sent_ids, test_para_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        with open(args.sts_dev_out, "w+") as f:
-            print(f"dev sts corr :: {dev_sts_corr :.3f}")
-            f.write(f"id \t Predicted_Similiary \n")
-            for p, s in zip(dev_sts_sent_ids, dev_sts_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.sts_dev_out, "w+") as f:
+                print(f"dev sts corr :: {dev_sts_corr :.3f}")
+                f.write(f"id \t Predicted_Similiary \n")
+                for p, s in zip(dev_sts_sent_ids, dev_sts_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        with open(args.sts_test_out, "w+") as f:
-            f.write(f"id \t Predicted_Similiary \n")
-            for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
-                f.write(f"{p} , {s} \n")
+            with open(args.sts_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Similiary \n")
+                for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
+                    f.write(f"{p} , {s} \n")
+        else:
+            return dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr
 
 
 def get_args():
@@ -599,13 +662,58 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
 
+    parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
+    parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-last-layer.csv")
+
+    parser.add_argument("--benchmark", action='store_true', help='Benchmark the model for training time and memory usage')
     args = parser.parse_args()
+    args.lora_dict = json.loads(args.lora_dict)
+
     return args
 
+def append_results_to_csv(args, metrics):
+    fields = ['Total Accuracy', 'SST Dev Accuracy', 'Para Dev Accuracy', 'STS Dev Correlation', 'SST Time', 'Para Time', 'STS Time', 'SST Memory', 'Para Memory', 'STS Memory', 'LoRA Mode', 'LoRA R', 'DoRA', 'Batch Size', 'Learning Rate', 'Epochs', 'Fine-Tune Mode', 'Dropout Probability']
+    file_exists = os.path.isfile(args.benchmark_results)
+    
+    with open(args.benchmark_results, 'a', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fields)
+        
+        if not file_exists:
+            writer.writeheader()  # Write headers only once
+        
+        writer.writerow(metrics)
 
 if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
-    train_multitask(args)
-    test_multitask(args)
+    if args.benchmark:
+        average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
+        dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr = test_multitask(args)
+
+        total_accuracy = get_leaderboard_score(dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr)
+        metrics = {
+        'Fine-Tune Mode': args.fine_tune_mode,
+        'Epochs': args.epochs,
+        'Batch Size': args.batch_size,
+        'Dropout Probability': args.hidden_dropout_prob,
+        'Learning Rate': args.lr,
+        'LoRA Mode': args.lora_dict['mode'],
+        'LoRA R': args.lora_dict['r'],
+        'DoRA': args.lora_dict['dora'],
+        'SST Dev Accuracy': dev_sentiment_accuracy,
+        'SST Time': average_sst_time,
+        'SST Memory': average_sst_memory,
+        'Para Dev Accuracy': dev_paraphrase_accuracy,
+        'Para Time': average_para_time,
+        'Para Memory': average_para_memory,
+        'STS Dev Correlation': dev_sts_corr,
+        'STS Time': average_sts_time,
+        'STS Memory': average_sts_memory,
+        'Total Accuracy': total_accuracy
+        }
+        append_results_to_csv(args, metrics)
+    else:
+        train_multitask(args)
+        test_multitask(args)
+

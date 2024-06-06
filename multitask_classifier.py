@@ -231,7 +231,7 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"Saved the model to {filepath}!")
 
 
-def train_multitask(args):
+def train_multitask(args, benchmark=False):
     device = torch.device('cpu')
     if args.use_gpu:
         if torch.cuda.is_available():
@@ -295,23 +295,25 @@ def train_multitask(args):
     if args.amp:  # and device is not mps
         gradscaler = torch.cuda.amp.GradScaler()
 
-    total_sst_time = 0
-    total_para_time = 0
-    total_sts_time = 0
+    if benchmark:
+        total_sst_time = 0
+        total_para_time = 0
+        total_sts_time = 0
 
-    total_sst_memory = 0
-    total_para_memory = 0
-    total_sts_memory = 0
+        total_sst_memory = 0
+        total_para_memory = 0
+        total_sts_memory = 0
     # Train for the specified number of epochs
     for epoch in range(args.epochs):
         model.train()  # put model in training mode
 
-        torch.cuda.reset_peak_memory_stats()
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_sst:
             print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
             sst_train_loss = 0
             sst_num_batches = 0
-
+       
             start_time = time.time()
             for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
                 b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
@@ -338,12 +340,14 @@ def train_multitask(args):
                 sst_train_loss += loss.item()
                 sst_num_batches += 1
             
-            total_sst_time += time.time() - start_time
+            if benchmark:
+                total_sst_time += time.time() - start_time
+                peak_memory_sst = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_sst_memory += peak_memory_sst
             sst_train_loss = sst_train_loss / sst_num_batches
-            peak_memory_sst = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
-            total_sst_memory += peak_memory_sst
-
-        torch.cuda.reset_peak_memory_stats()
+            
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_quora:
             print(f"\n================== Training Quora (Epoch {epoch}) ==================\n")
             para_train_loss = 0
@@ -382,12 +386,14 @@ def train_multitask(args):
                 para_train_loss += loss.item()
                 para_num_batches += 1
 
-            total_para_time += time.time() - start_time
+            if benchmark:
+                total_para_time += time.time() - start_time
+                peak_memory_para = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_para_memory += peak_memory_para
             para_train_loss = para_train_loss / para_num_batches
-            peak_memory_para = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
-            total_para_memory += peak_memory_para
-
-        torch.cuda.reset_peak_memory_stats()
+            
+        if benchmark:
+            torch.cuda.reset_peak_memory_stats()
         if args.train_sts:
             print(f"\n================== Training STS (Epoch {epoch}) ==================\n")
             sts_train_loss = 0
@@ -425,11 +431,11 @@ def train_multitask(args):
 
                 sts_train_loss += loss.item()
                 sts_num_batches += 1
-
-            total_sts_time += time.time() - start_time
+            if benchmark:
+                total_sts_time += time.time() - start_time
+                peak_memory_sts = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
+                total_sts_memory += peak_memory_sts
             sts_train_loss = sts_train_loss / sts_num_batches
-            peak_memory_sts = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
-            total_sts_memory += peak_memory_sts
 
         print(f"\n============== End of Epoch Evaluation ==============")
 
@@ -487,20 +493,21 @@ def train_multitask(args):
 
         # step the learning rate scheduler (halves lr)
         scheduler.step()
-
-    average_sst_time = total_sst_time / args.epochs if args.train_sst else 0
-    average_para_time = total_para_time / args.epochs if args.train_sst else 0
-    average_sts_time = total_sts_time / args.epochs if args.train_sst else 0
-    
-    average_sst_memory = total_sst_memory / args.epochs if args.train_sst else 0
-    average_para_memory = total_para_memory / args.epochs if args.train_sst else 0
-    average_sts_memory = total_sts_memory / args.epochs if args.train_sst else 0
-
     writer.close()
-    return average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory
+    
+    if benchmark:
+        average_sst_time = total_sst_time / args.epochs if args.train_sst else 0
+        average_para_time = total_para_time / args.epochs if args.train_sst else 0
+        average_sts_time = total_sts_time / args.epochs if args.train_sst else 0
+        
+        average_sst_memory = total_sst_memory / args.epochs if args.train_sst else 0
+        average_para_memory = total_para_memory / args.epochs if args.train_sst else 0
+        average_sts_memory = total_sts_memory / args.epochs if args.train_sst else 0
+        return average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory
 
 
-def test_multitask(args):
+
+def test_multitask(args, benchmark=False):
     '''Test and save predictions on the dev and test sets of all three tasks.'''
     with torch.no_grad():
         device = torch.device('cpu')
@@ -559,47 +566,49 @@ def test_multitask(args):
                                                                     para_dev_dataloader,
                                                                     sts_dev_dataloader, model, device)
         
-        # print(f"\n============= Evaluating Test Scores (SST, Para, STS) =============\n")
+        if not benchmark:
+            print(f"\n============= Evaluating Test Scores (SST, Para, STS) =============\n")
 
-        # test_sst_y_pred, \
-        #     test_sst_sent_ids, test_para_y_pred, test_para_sent_ids, test_sts_y_pred, test_sts_sent_ids = \
-        #         model_eval_test_multitask(sst_test_dataloader,
-        #                                   para_test_dataloader,
-        #                                   sts_test_dataloader, model, device)
+            test_sst_y_pred, \
+                test_sst_sent_ids, test_para_y_pred, test_para_sent_ids, test_sts_y_pred, test_sts_sent_ids = \
+                    model_eval_test_multitask(sst_test_dataloader,
+                                            para_test_dataloader,
+                                            sts_test_dataloader, model, device)
 
-        # with open(args.sst_dev_out, "w+") as f:
-        #     print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
-        #     f.write(f"id \t Predicted_Sentiment \n")
-        #     for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
-        #         f.write(f"{p} , {s} \n")
+            with open(args.sst_dev_out, "w+") as f:
+                print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
+                f.write(f"id \t Predicted_Sentiment \n")
+                for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        # with open(args.sst_test_out, "w+") as f:
-        #     f.write(f"id \t Predicted_Sentiment \n")
-        #     for p, s in zip(test_sst_sent_ids, test_sst_y_pred):
-        #         f.write(f"{p} , {s} \n")
+            with open(args.sst_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Sentiment \n")
+                for p, s in zip(test_sst_sent_ids, test_sst_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        # with open(args.para_dev_out, "w+") as f:
-        #     print(f"dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
-        #     f.write(f"id \t Predicted_Is_Paraphrase \n")
-        #     for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
-        #         f.write(f"{p} , {s} \n")
+            with open(args.para_dev_out, "w+") as f:
+                print(f"dev paraphrase acc :: {dev_paraphrase_accuracy :.3f}")
+                f.write(f"id \t Predicted_Is_Paraphrase \n")
+                for p, s in zip(dev_para_sent_ids, dev_para_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        # with open(args.para_test_out, "w+") as f:
-        #     f.write(f"id \t Predicted_Is_Paraphrase \n")
-        #     for p, s in zip(test_para_sent_ids, test_para_y_pred):
-        #         f.write(f"{p} , {s} \n")
+            with open(args.para_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Is_Paraphrase \n")
+                for p, s in zip(test_para_sent_ids, test_para_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        # with open(args.sts_dev_out, "w+") as f:
-        #     print(f"dev sts corr :: {dev_sts_corr :.3f}")
-        #     f.write(f"id \t Predicted_Similiary \n")
-        #     for p, s in zip(dev_sts_sent_ids, dev_sts_y_pred):
-        #         f.write(f"{p} , {s} \n")
+            with open(args.sts_dev_out, "w+") as f:
+                print(f"dev sts corr :: {dev_sts_corr :.3f}")
+                f.write(f"id \t Predicted_Similiary \n")
+                for p, s in zip(dev_sts_sent_ids, dev_sts_y_pred):
+                    f.write(f"{p} , {s} \n")
 
-        # with open(args.sts_test_out, "w+") as f:
-        #     f.write(f"id \t Predicted_Similiary \n")
-        #     for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
-        #         f.write(f"{p} , {s} \n")
-        return dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr
+            with open(args.sts_test_out, "w+") as f:
+                f.write(f"id \t Predicted_Similiary \n")
+                for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
+                    f.write(f"{p} , {s} \n")
+        else:
+            return dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr
 
 
 def get_args():

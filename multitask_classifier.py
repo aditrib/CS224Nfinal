@@ -665,6 +665,7 @@ def get_args():
     parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
     parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-last-layer.csv")
 
+    parser.add_argument("--benchmark", action='store_true', help='Benchmark the model for training time and memory usage')
     args = parser.parse_args()
     args.lora_dict = json.loads(args.lora_dict)
 
@@ -686,29 +687,33 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
-    average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
-    dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr = test_multitask(args)
+    if args.benchmark:
+        average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
+        dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr = test_multitask(args)
 
-    total_accuracy = get_leaderboard_score(dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr)
-    metrics = {
-    'Fine-Tune Mode': args.fine_tune_mode,
-    'Epochs': args.epochs,
-    'Batch Size': args.batch_size,
-    'Dropout Probability': args.hidden_dropout_prob,
-    'Learning Rate': args.lr,
-    'LoRA Mode': args.lora_dict['mode'],
-    'LoRA R': args.lora_dict['r'],
-    'DoRA': args.lora_dict['dora'],
-    'SST Dev Accuracy': dev_sentiment_accuracy,
-    'SST Time': average_sst_time,
-    'SST Memory': average_sst_memory,
-    'Para Dev Accuracy': dev_paraphrase_accuracy,
-    'Para Time': average_para_time,
-    'Para Memory': average_para_memory,
-    'STS Dev Correlation': dev_sts_corr,
-    'STS Time': average_sts_time,
-    'STS Memory': average_sts_memory,
-    'Total Accuracy': total_accuracy
-    }
-    append_results_to_csv(args, metrics)
+        total_accuracy = get_leaderboard_score(dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr)
+        metrics = {
+        'Fine-Tune Mode': args.fine_tune_mode,
+        'Epochs': args.epochs,
+        'Batch Size': args.batch_size,
+        'Dropout Probability': args.hidden_dropout_prob,
+        'Learning Rate': args.lr,
+        'LoRA Mode': args.lora_dict['mode'],
+        'LoRA R': args.lora_dict['r'],
+        'DoRA': args.lora_dict['dora'],
+        'SST Dev Accuracy': dev_sentiment_accuracy,
+        'SST Time': average_sst_time,
+        'SST Memory': average_sst_memory,
+        'Para Dev Accuracy': dev_paraphrase_accuracy,
+        'Para Time': average_para_time,
+        'Para Memory': average_para_memory,
+        'STS Dev Correlation': dev_sts_corr,
+        'STS Time': average_sts_time,
+        'STS Memory': average_sts_memory,
+        'Total Accuracy': total_accuracy
+        }
+        append_results_to_csv(args, metrics)
+    else:
+        train_multitask(args)
+        test_multitask(args)
 

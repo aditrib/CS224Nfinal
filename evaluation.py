@@ -56,12 +56,20 @@ def model_eval_sst(dataloader, model, device):
     return acc, f1, y_pred, y_true, sents, sent_ids
 
 # Evaluate paraphrase detection only
-def model_eval_para(dataloader, model, device):
+def model_eval_para(dataloader, model, device, max_batches = None):
+    """ 
+    max_batches can be used to limit evaluation
+    """
     # Evaluate paraphrase detection.
     para_y_true = []
     para_y_pred = []
     para_sent_ids = []
     for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+        
+        
+        if max_batches and step >= max_batches:
+            break    # limited eval
+        
         (b_ids1, b_mask1,
             b_ids2, b_mask2,
             b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'],

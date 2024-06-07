@@ -14,17 +14,16 @@ writes all required submission files.
 
 import random, numpy as np, argparse
 from types import SimpleNamespace
-
 import torch
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-
 from bert import BertModel
 from optimizer import AdamW
+from torch import optim
+import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
-
 from datasets import (
     SentenceClassificationDataset,
     SentenceClassificationTestDataset,
@@ -32,204 +31,33 @@ from datasets import (
     SentencePairTestDataset,
     load_multitask_data
 )
-
 from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask, get_leaderboard_score
-from lora_bert import inject_lora
+from multitask_bert import MultitaskBERT
 import time
-
-
 import warnings
 import os
 import json
 import csv
 from datetime import datetime
+from more_utils import seed_everything, save_model
+
+from globals import BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES, TQDM_DISABLE
 
 
-TQDM_DISABLE=False
 
 
-# Fix the random seed.
-def seed_everything(seed=11711):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+# ============= additional Loss funcs for STS (corr) ============
+def pearson_correlation_loss(preds, target):
+    vx = preds - torch.mean(preds)
+    vy = target - torch.mean(target)
+    cost = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)))
+    return 1 - cost  # return 1 - correlation to make it a loss
 
+def log_cosh_loss(preds, target):
+    def log_cosh(x):
+        return x + torch.nn.functional.softplus(-2. * x) - torch.log(torch.tensor(2.0))
+    return torch.mean(log_cosh(preds - target))
 
-BERT_HIDDEN_SIZE = 768
-N_SENTIMENT_CLASSES = 5
-
-
-class MultitaskBERT(nn.Module):
-    '''
-    This module should use BERT for 3 tasks:
-
-    - Sentiment classification (predict_sentiment)
-    - Paraphrase detection (predict_paraphrase)
-    - Semantic Textual Similarity (predict_similarity)
-    '''
-    def __init__(self, config):
-        super(MultitaskBERT, self).__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
-        # last-layer mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-layer", "full-model"]
-        assert config.lora_dict['mode'] in ['none', 'attn', 'attn-only', 'all-lin', 'all-lin-only']
-        assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
-        assert config.lora_dict['dora'] in [0, 1]
-        # LoRA settings
-        if config.fine_tune_mode != 'full-model' and config.lora_dict['mode'] != 'none':
-            raise ValueError("LoRA can only be used in full-model fine-tuning mode.")
-        
-        # Pretrain mode does not require updating BERT parameters.
-        for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-layer' or config.lora_dict['mode'] in ['attn-only', 'all-lin-only']:
-                param.requires_grad = False
-            elif config.fine_tune_mode == 'full-model':
-                param.requires_grad = True
-        
-        if config.lora_dict['mode'] != 'none':
-            self.bert = inject_lora(self.bert, config.lora_dict['mode'], config.lora_dict['r'], config.lora_dict['dora'])
-
-        assert config.clf in ["linear", "nonlinear", "conv"]
-        self.clf = config.clf
-        # You will want to add layers here to perform the downstream tasks.
-        ### 
-
-        # ===== sentiment =====
-        self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
-        self.sentiment_nonlinear = nn.Sequential(nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES))
-        
-        self.sentiment_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, N_SENTIMENT_CLASSES)  
-        )
-
-        # ===== paraphrase ======
-        self.paraphrase_linear = nn.Linear(BERT_HIDDEN_SIZE, 1)
-        self.paraphrase_nonlinear = nn.Sequential(nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE//2, 1))
-        self.paraphrase_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
-        )
-
-        # ===== similarity ========
-        self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE+1, 1)
-        self.similarity_nonlinear = nn.Sequential(nn.Linear(2*BERT_HIDDEN_SIZE+1, BERT_HIDDEN_SIZE),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE, 1))
-        self.similarity_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (2*BERT_HIDDEN_SIZE+1 - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
-        )
-
-        # ===== helper layers ======
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-
-    def forward(self, input_ids, attention_mask):
-        """Takes a batch of sentences and produces embeddings for them.
-        
-        Shape returned = Batch size, bert hidden dimension (768)  (N, D)
-        """
-        # The final BERT embedding is the hidden state of [CLS] token (the first token)
-        # Here, you can start by just returning the embeddings straight from BERT.
-        # When thinking of improvements, you can later try modifying this
-        # (e.g., by adding other layers).
-        ### TODO
-        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
-        embeddings = outputs['pooler_output'] 
-        return embeddings
-
-    def predict_sentiment(self, input_ids, attention_mask):
-        '''Given a batch of sentences, outputs logits for classifying sentiment.
-        There are 5 sentiment classes:
-        (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
-        Thus, your output should contain 5 logits for each sentence.
-        '''
-        ### TODO
-        embeddings = self.forward(input_ids, attention_mask)
-        
-        if self.clf == "linear":
-            out = self.sentiment_linear(embeddings)
-        elif self.clf == "nonlinear":
-            out = self.sentiment_nonlinear(embeddings)
-        else: # self.clf == "conv"
-            out = self.sentiment_conv(torch.unsqueeze(embeddings, 1))
-        return out
-
-
-    def predict_paraphrase(self,
-                           input_ids_1, attention_mask_1,
-                           input_ids_2, attention_mask_2):
-        '''Given a batch of pairs of sentences, outputs a single logit for predicting whether they are paraphrases.
-        Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
-        during evaluation.
-        '''
-        ### TODO
-        embeds_1 = self.forward(input_ids_1, attention_mask_1)
-        embeds_2 = self.forward(input_ids_2, attention_mask_2)
-        diff = torch.abs(embeds_1 - embeds_2)
-
-        if self.clf == "linear":
-            out = self.paraphrase_linear(diff)
-        elif self.clf == "nonlinear":
-            out = self.paraphrase_nonlinear(diff)
-        else: # self.clf == "conv"
-            out = self.paraphrase_conv(torch.unsqueeze(diff, 1))
-        return out
-
-
-    def predict_similarity(self,
-                           input_ids_1, attention_mask_1,
-                           input_ids_2, attention_mask_2):
-        '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
-        Note that your output should be unnormalized (a logit).
-        '''
-        ### TODO
-        embeds_1 = self.forward(input_ids_1, attention_mask_1)
-        embeds_2 = self.forward(input_ids_2, attention_mask_2)
-        cosine_sim = F.cosine_similarity(embeds_1, embeds_2).unsqueeze(-1)
-        elem_prods = embeds_1 * embeds_2
-        diff = torch.abs(embeds_1 - embeds_2)
-        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
-
-        if self.clf == "linear":
-            out = self.similarity_linear(features)
-        elif self.clf == "nonlinear":
-            out = self.similarity_nonlinear(features)
-        else: # self.clf == "conv"
-            out = self.similarity_conv(torch.unsqueeze(features, 1))
-        return out
-
-
-def save_model(model, optimizer, args, config, filepath):
-    save_info = {
-        'model': model.state_dict(),
-        'optim': optimizer.state_dict(),
-        'args': args,
-        'model_config': config,
-        'system_rng': random.getstate(),
-        'numpy_rng': np.random.get_state(),
-        'torch_rng': torch.random.get_rng_state(),
-    }
-
-    torch.save(save_info, filepath)
-    print(f"Saved the model to {filepath}!")
 
 
 def train_multitask(args, benchmark=False):
@@ -243,8 +71,8 @@ def train_multitask(args, benchmark=False):
     print(f"Device Set: {device}\n")
 
     # Create datasets and dataloaders
-    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train, args.para_train, args.sts_train, split='train')
-    sst_dev_data, _, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev, args.para_dev, args.sts_dev, split='dev')
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train, args.para_train, args.sts_train, split='train', extra_clean = args.extra_clean)
+    sst_dev_data, _, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev, args.para_dev, args.sts_dev, split='dev', extra_clean = args.extra_clean)
 
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
@@ -277,11 +105,51 @@ def train_multitask(args, benchmark=False):
     model = MultitaskBERT(config)
     model = model.to(device)
 
-    lr = args.lr
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    # lr scheduler halves the learning rate every epoch
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.5 ** epoch)
+    # ============= Optimizer and LR =================
+    # Set up the optimizer
+    
+    # our handmade one uWu
+    # optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    
+    # Original experiments, grid search, freezing etc. used Adam as follows:
+    # optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    # AdamW optimizer: variant of Adam with better handling of weight decay
+    # optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-1)
+
+    # SGD with Nesterov momentum: often better for image classification tasks
+    # optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True, weight_decay=1e-1)
+    #optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, nesterov=True, weight_decay = 1e-5)  # 
+
+    # Plain SGD: simple and often effective, without Nesterov momentum
+    # optimizer = optim.SGD(model.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    # RAdam (Rectified Adam): combines the benefits of adaptive learning rate and robustness
+    # optimizer = optim.RAdam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+
+    # SparseAdam: a variant of Adam meant to handle sparse gradients more efficiently
+    # optimizer = optim.SparseAdam(model.parameters(), lr=args.lr)
+
+    # Adamax: a variant of Adam based on the infinity norm, suitable for embeddings and sparse data
+    sst_optimizer = optim.Adamax(model.parameters(), lr=args.lr * 10, weight_decay=1e-5)   # SST needs larger learning rate
+    para_optimizer = optim.Adamax(model.parameters(), lr=args.lr, weight_decay=1e-3)
+    sts_optimizer = optim.Adamax(model.parameters(), lr=args.lr * 3, weight_decay=5e-3)
+    
+    if args.fine_tune_mode == "iterative":
+        # Lambda lr scheduler halves the learning rate every epoch (and also when unfreezing)
+        lambda_lr = lambda epoch: 0.5 ** epoch
+        sst_scheduler = lr_scheduler.LambdaLR(sst_optimizer, lr_lambda=lambda_lr)
+        para_scheduler = lr_scheduler.LambdaLR(para_optimizer, lr_lambda=lambda_lr)
+        sts_scheduler = lr_scheduler.LambdaLR(sts_optimizer, lr_lambda=lambda_lr)
+    else:
+        # Cosine Annealing
+        sst_scheduler = lr_scheduler.CosineAnnealingLR(sst_optimizer, T_max=args.epochs, eta_min=args.lr / 5)
+        para_scheduler = lr_scheduler.CosineAnnealingLR(para_optimizer, T_max=args.epochs, eta_min=args.lr / 4)
+        sts_scheduler = lr_scheduler.CosineAnnealingLR(sts_optimizer, T_max=args.epochs, eta_min=args.lr / 4)
+
+        
+    # =================================================
     log_dir = os.path.join("tensorboard_logs", f"{args.filepath.split('.')[0]}_{datetime.now()}")
     writer = SummaryWriter(log_dir = log_dir)
 
@@ -306,6 +174,39 @@ def train_multitask(args, benchmark=False):
         total_sts_memory = 0
     # Train for the specified number of epochs
     for epoch in range(args.epochs):
+        
+        # ====================== Manage Iterative Unfreezing ==========================
+        if args.fine_tune_mode == 'iterative':
+            checkpoint_slice = args.epochs // 5
+            if epoch < checkpoint_slice:
+                model.manage_freezing('freezeall')
+                print(f"\n====== All BERT Layers Frozen ======\n")
+            elif epoch < checkpoint_slice * 2:
+                model.manage_freezing('unfreezetop3')
+                # sst_scheduler.step()
+                # para_scheduler.step()
+                # sts_scheduler.step()
+                print(f"\n====== Top 3 BERT Layers Unfrozen ======\n")
+            elif epoch < checkpoint_slice * 3:
+                model.manage_freezing('unfreezetop6')
+                # sst_scheduler.step()
+                # para_scheduler.step()
+                # sts_scheduler.step()
+                print(f"\n====== Top 6 BERT Layers Unfrozen ======\n")
+            elif epoch < checkpoint_slice * 4:
+                model.manage_freezing('unfreezetop9')
+                # sst_scheduler.step()
+                # para_scheduler.step()
+                # sts_scheduler.step()
+                print(f"\n====== Top 9 BERT Layers Unfrozen ======\n")
+            else:
+                model.manage_freezing('unfreezeall')
+                # sst_scheduler.step()
+                # para_scheduler.step()
+                # sts_scheduler.step()
+                print(f"\n====== All BERT Layers Unfrozen ======\n")   # 12 total attn layers
+        
+        
         model.train()  # put model in training mode
 
         if benchmark:
@@ -322,7 +223,7 @@ def train_multitask(args, benchmark=False):
                 b_mask = b_mask.to(device)
                 b_labels = b_labels.to(device)
 
-                optimizer.zero_grad()
+                sst_optimizer.zero_grad()
 
                 if args.amp:  # auto multi-precision
                     with torch.cuda.amp.autocast():
@@ -330,13 +231,13 @@ def train_multitask(args, benchmark=False):
                         loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
                     gradscaler.scale(loss).backward()
-                    gradscaler.step(optimizer)
+                    gradscaler.step(sst_optimizer)
                     gradscaler.update()
                 else:  # vanilla
                     logits = model.predict_sentiment(b_ids, b_mask)
                     loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
                     loss.backward()
-                    optimizer.step()
+                    sst_optimizer.step()
 
                 sst_train_loss += loss.item()
                 sst_num_batches += 1
@@ -364,7 +265,7 @@ def train_multitask(args, benchmark=False):
                 b_mask2 = b_mask2.to(device)
                 b_labels = b_labels.to(device)
 
-                optimizer.zero_grad()
+                para_optimizer.zero_grad()
 
                 if args.amp:  # auto multi-precision
                     with torch.cuda.amp.autocast():
@@ -374,7 +275,7 @@ def train_multitask(args, benchmark=False):
                         loss = criterion(logits, b_labels)
 
                     gradscaler.scale(loss).backward()
-                    gradscaler.step(optimizer)
+                    gradscaler.step(para_optimizer)
                     gradscaler.update()
                 else:  # vanilla
                     logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
@@ -382,7 +283,7 @@ def train_multitask(args, benchmark=False):
                     criterion = torch.nn.BCEWithLogitsLoss()  # more stable, can autocast
                     loss = criterion(logits, b_labels)
                     loss.backward()
-                    optimizer.step()
+                    para_optimizer.step()
 
                 para_train_loss += loss.item()
                 para_num_batches += 1
@@ -410,25 +311,27 @@ def train_multitask(args, benchmark=False):
                 b_mask2 = b_mask2.to(device)
                 b_labels = b_labels.to(device)
 
-                optimizer.zero_grad()
+                sts_optimizer.zero_grad()
+
+                # =========== Set Up STS Criterion ============
+                # criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
+                criterion = pearson_correlation_loss
 
                 if args.amp:  # auto multi-precision
                     with torch.cuda.amp.autocast():
                         logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
                         b_labels = b_labels.flatten().float()  # reshape to match logits
-                        criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
                         loss = criterion(logits, b_labels)
 
                     gradscaler.scale(loss).backward()
-                    gradscaler.step(optimizer)
+                    gradscaler.step(sts_optimizer)
                     gradscaler.update()
                 else:  # vanilla
                     logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
                     b_labels = b_labels.flatten().float()  # reshape to match logits
-                    criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
                     loss = criterion(logits, b_labels)
                     loss.backward()
-                    optimizer.step()
+                    sts_optimizer.step()
 
                 sts_train_loss += loss.item()
                 sts_num_batches += 1
@@ -490,10 +393,16 @@ def train_multitask(args, benchmark=False):
         if dev_leaderboard_score > best_leaderboard_score:  # TODO: come up with more clever checkpointing than just caring about SST
             best_leaderboard_score = dev_leaderboard_score
             print(f"New Best Leaderboard Avg. Score: {best_leaderboard_score:.3f}!")
-            save_model(model, optimizer, args, config, args.filepath)
+            save_model(model, 
+                       (sst_optimizer, para_optimizer, sts_optimizer), 
+                       args, 
+                       config, 
+                       args.filepath)
 
-        # step the learning rate scheduler (halves lr)
-        scheduler.step()
+        # ========== step the learning rate schedulers ==========
+        sst_scheduler.step()
+        para_scheduler.step()
+        sts_scheduler.step()
     writer.close()
     
     if benchmark:
@@ -530,10 +439,10 @@ def test_multitask(args, benchmark=False):
         print(f"Loaded model to test from {args.filepath}")
 
         sst_test_data, num_labels,para_test_data, sts_test_data = \
-            load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
+            load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test', extra_clean = args.extra_clean)
 
         sst_dev_data, num_labels,para_dev_data, sts_dev_data = \
-            load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev,split='dev')
+            load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev,split='dev', extra_clean = args.extra_clean)
 
         sst_test_data = SentenceClassificationTestDataset(sst_test_data, args)
         sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
@@ -623,7 +532,11 @@ def get_args():
                         help="Type of classifier layer. Supported: linear, nonlinear, or conv.",
                         choices=("linear", "nonlinear", "conv"))
 
+    # dataset extra cleaning with nltk
+    parser.add_argument("--extra_clean", action = 'store_true', default = False, help = "Perform extra nltk etc. data cleaning.")
+
     # lr scheduling 
+    #TODO
 
     # dataset selections for training
     parser.add_argument("--train_sst", action='store_true', help='Train against SST sentiment dataset (CELoss)')
@@ -646,8 +559,10 @@ def get_args():
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--fine-tune-mode", type=str,
-                        help='last-layer: the BERT parameters are frozen and the task specific head parameters are updated; full-model: BERT parameters are updated as well',
-                        choices=('last-layer', 'full-model'), default="last-layer")
+                        help=('last-layer: the BERT parameters are frozen and the task specific head parameters are updated;'
+                              'full-model: BERT parameters are updated as well'
+                              'iterative: BERT parameters are progressively unfrozen more deeply throughout training'),
+                        choices=('last-layer', 'full-model', 'iterative'), default="last-layer")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--sst_dev_out", type=str, default="predictions/sst-dev-output.csv")
@@ -661,7 +576,7 @@ def get_args():
 
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
-    parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
+    parser.add_argument("--lr", type=float, help="Initial learning rate", default=1e-5)
 
     parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
     parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-last-layer.csv")

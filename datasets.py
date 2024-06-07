@@ -14,6 +14,27 @@ import torch
 from torch.utils.data import Dataset
 from tokenizer import BertTokenizer
 
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+import re
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from tqdm import tqdm
+
+
+
+lemmatizer = WordNetLemmatizer()
+special_chars_pattern = re.compile(r'[^a-zA-Z\s]')
+stop_words = set(stopwords.words('english'))
+lemmatizer = WordNetLemmatizer()
+def clean_text(text):
+    text = text.lower()
+    text = special_chars_pattern.sub('', text)
+    tokens = nltk.word_tokenize(text)
+    tokens = [lemmatizer.lemmatize(word) for word in tokens]
+    return ' '.join(tokens)
 
 def preprocess_string(s):
     return ' '.join(s.lower()
@@ -208,19 +229,31 @@ class SentencePairTestDataset(Dataset):
         return batched_data
 
 
-def load_multitask_data(sentiment_filename,paraphrase_filename,similarity_filename,split='train'):
+def load_multitask_data(sentiment_filename,
+                        paraphrase_filename,
+                        similarity_filename,
+                        split='train',
+                        extra_clean = False):
+    
+    print("\n======== Loading Data =========")
     sentiment_data = []
     num_labels = {}
     if split == 'test':
         with open(sentiment_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
-                sent = record['sentence'].lower().strip()
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
+                if extra_clean:
+                    sent = clean_text(record['sentence'].lower().strip())
+                else:
+                    sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
                 sentiment_data.append((sent,sent_id))
     else:
         with open(sentiment_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
-                sent = record['sentence'].lower().strip()
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
+                if extra_clean:
+                    sent = clean_text(record['sentence'].lower().strip())
+                else:
+                    sent = record['sentence'].lower().strip()
                 sent_id = record['id'].lower().strip()
                 label = int(record['sentiment'].strip())
                 if label not in num_labels:
@@ -232,20 +265,30 @@ def load_multitask_data(sentiment_filename,paraphrase_filename,similarity_filena
     paraphrase_data = []
     if split == 'test':
         with open(paraphrase_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
                 sent_id = record['id'].lower().strip()
-                paraphrase_data.append((preprocess_string(record['sentence1']),
-                                        preprocess_string(record['sentence2']),
-                                        sent_id))
+                if extra_clean:
+                    paraphrase_data.append((clean_text(preprocess_string(record['sentence1'])),
+                                            clean_text(preprocess_string(record['sentence2'])),
+                                            sent_id))
+                else:
+                    paraphrase_data.append((preprocess_string(record['sentence1']),
+                                            preprocess_string(record['sentence2']),
+                                            sent_id))
 
     else:
         with open(paraphrase_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
                 try:
                     sent_id = record['id'].lower().strip()
-                    paraphrase_data.append((preprocess_string(record['sentence1']),
-                                            preprocess_string(record['sentence2']),
-                                            int(float(record['is_duplicate'])),sent_id))
+                    if extra_clean:
+                        paraphrase_data.append((clean_text(preprocess_string(record['sentence1'])),
+                                                clean_text(preprocess_string(record['sentence2'])),
+                                                int(float(record['is_duplicate'])),sent_id))
+                    else:
+                        paraphrase_data.append((preprocess_string(record['sentence1']),
+                                                preprocess_string(record['sentence2']),
+                                                int(float(record['is_duplicate'])),sent_id))
                 except:
                     pass
 
@@ -254,18 +297,28 @@ def load_multitask_data(sentiment_filename,paraphrase_filename,similarity_filena
     similarity_data = []
     if split == 'test':
         with open(similarity_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
                 sent_id = record['id'].lower().strip()
-                similarity_data.append((preprocess_string(record['sentence1']),
-                                        preprocess_string(record['sentence2'])
-                                        ,sent_id))
+                if extra_clean:
+                    similarity_data.append((clean_text(preprocess_string(record['sentence1'])),
+                                            clean_text(preprocess_string(record['sentence2']))
+                                            ,sent_id))
+                else:
+                    similarity_data.append((preprocess_string(record['sentence1']),
+                                            preprocess_string(record['sentence2'])
+                                            ,sent_id))
     else:
         with open(similarity_filename, 'r') as fp:
-            for record in csv.DictReader(fp,delimiter = '\t'):
+            for record in tqdm(csv.DictReader(fp,delimiter = '\t')):
                 sent_id = record['id'].lower().strip()
-                similarity_data.append((preprocess_string(record['sentence1']),
-                                        preprocess_string(record['sentence2']),
-                                        float(record['similarity']),sent_id))
+                if extra_clean:
+                    similarity_data.append((clean_text(preprocess_string(record['sentence1'])),
+                                            clean_text(preprocess_string(record['sentence2'])),
+                                            float(record['similarity']),sent_id))
+                else:
+                    similarity_data.append((preprocess_string(record['sentence1']),
+                                            preprocess_string(record['sentence2']),
+                                            float(record['similarity']),sent_id))
 
     print(f"Loaded {len(similarity_data)} {split} examples from {similarity_filename}")
 

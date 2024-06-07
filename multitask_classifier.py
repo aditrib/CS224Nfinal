@@ -176,6 +176,14 @@ def train_multitask(args, benchmark=False):
         total_sst_memory = 0
         total_para_memory = 0
         total_sts_memory = 0
+
+        best_sst_dev_acc = float('-inf')
+        best_para_dev_acc = float('-inf')
+        best_sts_dev_corr = float('-inf')
+
+        sst_dev_acc = float('-inf')
+        para_dev_acc = float('-inf')
+        sts_dev_corr = float('-inf')
     # Train for the specified number of epochs
     for epoch in range(args.epochs):
         
@@ -402,6 +410,13 @@ def train_multitask(args, benchmark=False):
                        args, 
                        config, 
                        args.filepath)
+        if benchmark:
+            if sst_dev_acc > best_sst_dev_acc:
+                best_sst_dev_acc = sst_dev_acc
+            if para_dev_acc > best_para_dev_acc:
+                best_para_dev_acc = para_dev_acc
+            if sts_dev_corr > best_sts_dev_corr:
+                best_sts_dev_corr = sts_dev_corr
 
         # ========== step the learning rate schedulers ==========
         sst_scheduler.step()
@@ -417,7 +432,7 @@ def train_multitask(args, benchmark=False):
         average_sst_memory = total_sst_memory / args.epochs if args.train_sst else 0
         average_para_memory = total_para_memory / args.epochs if args.train_sst else 0
         average_sts_memory = total_sts_memory / args.epochs if args.train_sst else 0
-        return average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory
+        return average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory, best_sst_dev_acc, best_para_dev_acc, best_sts_dev_corr
 
 
 
@@ -591,7 +606,7 @@ def get_args():
     parser.add_argument("--lr", type=float, help="Initial learning rate", default=1e-5)
 
     parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
-    parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-last-layer.csv")
+    parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-only.csv")
 
     parser.add_argument("--benchmark", action='store_true', help='Benchmark the model for training time and memory usage')
     args = parser.parse_args()
@@ -616,10 +631,11 @@ if __name__ == "__main__":
     args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-{args.optim}-{args.sst_lr_multiplier}-{args.para_lr_multiplier}-{args.sts_lr_multiplier}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     if args.benchmark:
-        average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
-        dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr = test_multitask(args)
+        average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory, sst_dev_acc, para_dev_acc, sts_dev_corr = train_multitask(args, args.benchmark)
 
-        total_accuracy = get_leaderboard_score(dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr)
+        total_accuracy = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, 
+                                            para_dev_acc if args.train_quora else 0, 
+                                            sts_dev_corr if args.train_sts else 0)
         metrics = {
         'Fine-Tune Mode': args.fine_tune_mode,
         'Epochs': args.epochs,
@@ -629,13 +645,13 @@ if __name__ == "__main__":
         'LoRA Mode': args.lora_dict['mode'],
         'LoRA R': args.lora_dict['r'],
         'DoRA': args.lora_dict['dora'],
-        'SST Dev Accuracy': dev_sentiment_accuracy,
+        'SST Dev Accuracy': sst_dev_acc,
         'SST Time': average_sst_time,
         'SST Memory': average_sst_memory,
-        'Para Dev Accuracy': dev_paraphrase_accuracy,
+        'Para Dev Accuracy': para_dev_acc,
         'Para Time': average_para_time,
         'Para Memory': average_para_memory,
-        'STS Dev Correlation': dev_sts_corr,
+        'STS Dev Correlation': sts_dev_corr,
         'STS Time': average_sts_time,
         'STS Memory': average_sts_memory,
         'Total Accuracy': total_accuracy

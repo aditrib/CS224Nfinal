@@ -23,7 +23,8 @@ class LoRALinear(nn.Module):
             nn.init.zeros_(self.lora_B.weight)
 
             if dora:
-                self.magnitude = nn.Parameter(torch.ones(out_features, 1))
+                col_norms = self.original_linear.weight.norm(p=2, dim=0, keepdim=True)
+                self.magnitude = nn.Parameter(col_norms)
         else:
             self.lora_A = None
             self.lora_B = None
@@ -33,11 +34,11 @@ class LoRALinear(nn.Module):
         if self.lora_A is not None and self.lora_B is not None:
             if self.dora:
                 lora_weights = self.lora_B.weight @ self.lora_A.weight
-                # updated_weights = self.original_linear.weight + lora_weights
-                norms = lora_weights.norm(p=2, dim=0, keepdim=True)      
-                direction = lora_weights / norms
-                updated_weights = self.original_linear.weight + self.magnitude * direction
-                return F.linear(x, updated_weights, self.original_linear.bias)
+                updated_weights = self.original_linear.weight + lora_weights
+                col_norms = updated_weights.norm(p=2, dim=0, keepdim=True)
+                direction = updated_weights / col_norms     
+                scaled_weights = self.magnitude * direction   
+                return F.linear(x, scaled_weights, self.original_linear.bias)
             else:
                 lora_update = self.lora_B(self.lora_A(x))
                 return original_output + lora_update

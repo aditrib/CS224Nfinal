@@ -42,6 +42,7 @@ import warnings
 import os
 import json
 import csv
+from datetime import datetime
 
 
 TQDM_DISABLE=False
@@ -281,7 +282,7 @@ def train_multitask(args, benchmark=False):
 
     # lr scheduler halves the learning rate every epoch
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 0.5 ** epoch)
-    log_dir = os.path.join("logs", args.filepath)
+    log_dir = os.path.join("tensorboard_logs", f"{args.filepath.split('.')[0]}_{datetime.now()}")
     writer = SummaryWriter(log_dir = log_dir)
 
     best_leaderboard_score = 0

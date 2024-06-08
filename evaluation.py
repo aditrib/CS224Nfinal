@@ -92,7 +92,7 @@ def model_eval_para(dataloader, model, device, max_batches = None):
     f1 = f1_score(para_y_true, para_y_pred, average='macro')
     acc = np.mean(np.array(para_y_pred) == np.array(para_y_true))
 
-    return acc, f1, para_y_pred, para_y_true
+    return acc, f1, para_y_pred, para_y_true, para_sent_ids
 
 
 # eval STS only
@@ -124,7 +124,7 @@ def model_eval_sts(dataloader, model, device):
     pearson_mat = np.corrcoef(sts_y_pred,sts_y_true)
     sts_corr = pearson_mat[1][0]
 
-    return sts_corr, sts_y_pred, sts_y_true
+    return sts_corr, sts_y_pred, sts_y_true, sts_sent_ids
 
 # Evaluate multitask model on dev sets.
 def model_eval_multitask(sentiment_dataloader,

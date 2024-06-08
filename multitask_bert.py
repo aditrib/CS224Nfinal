@@ -54,52 +54,71 @@ class MultitaskBERT(nn.Module):
         # You will want to add layers here to perform the downstream tasks.
         ### 
 
+
+        FEATURE_SIZE = 4 * BERT_HIDDEN_SIZE + 1
+        FEATURE_PROJ_SIZE = (FEATURE_SIZE - 1) //2
+        
         # ===== sentiment =====
         self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
-        self.sentiment_nonlinear = nn.Sequential(nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES))
-        
+        self.sentiment_nonlinear = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE//2),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES)
+        )
+
         self.sentiment_conv = nn.Sequential(
             nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
+            nn.BatchNorm1d(4),
             nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
             nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
             nn.ReLU(),  
             nn.Linear(BERT_HIDDEN_SIZE // 2, N_SENTIMENT_CLASSES)  
         )
-        
-        
+
         # ====== comparison task shared layer ======
         # learn linear mapping which can be shared among STS and Quora tasks for comparison features
         self.comparison_features_fcn = nn.Sequential(
-            nn.Linear(2*BERT_HIDDEN_SIZE+1, 2*BERT_HIDDEN_SIZE+1),
+            nn.Linear(FEATURE_SIZE, FEATURE_PROJ_SIZE),
+            nn.BatchNorm1d(FEATURE_PROJ_SIZE),
             nn.ReLU(),
-            nn.Linear(2*BERT_HIDDEN_SIZE+1, 2*BERT_HIDDEN_SIZE+1)
+            nn.Linear(FEATURE_PROJ_SIZE, FEATURE_PROJ_SIZE),
+            nn.BatchNorm1d(FEATURE_PROJ_SIZE)
         )
-            
+
         # ===== paraphrase ======
-        self.paraphrase_linear = nn.Linear(2*BERT_HIDDEN_SIZE+1, 1)
-        self.paraphrase_nonlinear = nn.Sequential(nn.Linear(2*BERT_HIDDEN_SIZE+1, BERT_HIDDEN_SIZE),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE, 1))
+        self.paraphrase_linear = nn.Linear(FEATURE_PROJ_SIZE, 1)
+        self.paraphrase_nonlinear = nn.Sequential(
+            nn.Linear(FEATURE_PROJ_SIZE, BERT_HIDDEN_SIZE),
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE, 1)
+        )
         self.paraphrase_conv =  nn.Sequential(
             nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
+            nn.BatchNorm1d(4),
             nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (2*BERT_HIDDEN_SIZE+1 - 2), BERT_HIDDEN_SIZE // 2),  
+            nn.Linear(4 * (FEATURE_PROJ_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
             nn.ReLU(),  
             nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
         )
-        
 
         # ===== similarity ========
-        self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE+1, 1)
-        self.similarity_nonlinear = nn.Sequential(nn.Linear(2*BERT_HIDDEN_SIZE+1, BERT_HIDDEN_SIZE),
-                                        nn.ReLU(),
-                                        nn.Linear(BERT_HIDDEN_SIZE, 1))
+        self.similarity_linear = nn.Linear(FEATURE_PROJ_SIZE, 1)
+        self.similarity_nonlinear = nn.Sequential(
+            nn.Linear(FEATURE_PROJ_SIZE, BERT_HIDDEN_SIZE),
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE, 1)
+        )
         self.similarity_conv = nn.Sequential(
             nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
+            nn.BatchNorm1d(4),
             nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (2*BERT_HIDDEN_SIZE+1 - 2), BERT_HIDDEN_SIZE // 2),  
+            nn.Linear(4 * (FEATURE_PROJ_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
+            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
             nn.ReLU(),  
             nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
         )
@@ -244,7 +263,7 @@ class MultitaskBERT(nn.Module):
         cosine_sim = F.cosine_similarity(embeds_1, embeds_2).unsqueeze(-1)
         elem_prods = embeds_1 * embeds_2
         diff = torch.abs(embeds_1 - embeds_2)
-        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
+        features = torch.cat([embeds_1, embeds_2, diff, elem_prods, cosine_sim], dim=1)
         features = self.comparison_features_fcn(features)
         
         return features
@@ -288,3 +307,83 @@ class MultitaskBERT(nn.Module):
         else: # self.clf == "conv"
             out = self.similarity_conv(torch.unsqueeze(features, 1))
         return out
+    
+# ====== G6 Duality of Man =======
+class MultitaskBERTDualityOfMan(MultitaskBERT):
+    def __init__(self, config):
+        super(MultitaskBERTDualityOfMan, self).__init__(config)
+        
+        # ===== sentiment =====
+        self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
+        self.sentiment_nonlinear = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES)
+        )
+
+        self.sentiment_conv = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
+            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
+            nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE // 2, N_SENTIMENT_CLASSES)
+        )
+
+        # ====== comparison task shared layer ======
+        # learn linear mapping which can be shared among STS and Quora tasks for comparison features
+        self.comparison_features_fcn = nn.Sequential(
+            nn.Linear(2*BERT_HIDDEN_SIZE + 1, 2*BERT_HIDDEN_SIZE + 1),
+            nn.ReLU(),
+            nn.Linear(2*BERT_HIDDEN_SIZE + 1, 2*BERT_HIDDEN_SIZE + 1)
+        )
+
+        # ===== paraphrase ======
+        self.paraphrase_linear = nn.Linear(2*BERT_HIDDEN_SIZE + 1, 1)
+        self.paraphrase_nonlinear = nn.Sequential(
+            nn.Linear(2*BERT_HIDDEN_SIZE + 1, BERT_HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE, 1)
+        )
+        self.paraphrase_conv = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
+            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
+            nn.Linear(4 * (2*BERT_HIDDEN_SIZE + 1 - 2), BERT_HIDDEN_SIZE // 2),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)
+        )
+
+        # ===== similarity ========
+        self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE + 1, 1)
+        self.similarity_nonlinear = nn.Sequential(
+            nn.Linear(2*BERT_HIDDEN_SIZE + 1, BERT_HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE, 1)
+        )
+        self.similarity_conv = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
+            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
+            nn.Linear(4 * (2*BERT_HIDDEN_SIZE + 1 - 2), BERT_HIDDEN_SIZE // 2),
+            nn.ReLU(),
+            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)
+        )
+
+        # ===== helper layers ======
+        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
+
+    def extract_comparison_features(self,
+                                    input_ids_1, attention_mask_1,
+                                    input_ids_2, attention_mask_2):
+        """ 
+        Given a batch of pairs of sentences, extract comparison features for Quora and STS tasks.
+        
+        Useful for both Sim tasks.
+        """
+        embeds_1 = self.forward(input_ids_1, attention_mask_1, which_bert="sim")
+        embeds_2 = self.forward(input_ids_2, attention_mask_2, which_bert="sim")
+        cosine_sim = F.cosine_similarity(embeds_1, embeds_2).unsqueeze(-1)
+        elem_prods = embeds_1 * embeds_2
+        diff = torch.abs(embeds_1 - embeds_2)
+        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
+        features = self.comparison_features_fcn(features)
+        return features
+    

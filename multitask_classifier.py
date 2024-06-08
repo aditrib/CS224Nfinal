@@ -132,13 +132,17 @@ def train_multitask(args, benchmark=False):
     # optimizer = optim.SparseAdam(model.parameters(), lr=args.lr)
 
     # Adamax: a variant of Adam based on the infinity norm, suitable for embeddings and sparse data
-    sst_optimizer = optim.Adamax(model.parameters(), lr=args.lr * 10, weight_decay=1e-5)   # SST needs larger learning rate
-    para_optimizer = optim.Adamax(model.parameters(), lr=args.lr, weight_decay=1e-3)
-    sts_optimizer = optim.Adamax(model.parameters(), lr=args.lr * 3, weight_decay=5e-3)
+    if args.optim == "Adamax":
+        optimizer = optim.Adamax
+    elif args.optim == "RAdam":
+        optimizer = optim.RAdam
+    sst_optimizer = optimizer(model.parameters(), lr=args.lr * args.sst_lr_multiplier, weight_decay=args.sst_weight_decay)   # SST needs larger learning rate
+    para_optimizer = optimizer(model.parameters(), lr=args.lr * args.para_lr_multiplier, weight_decay=args.para_weight_decay)
+    sts_optimizer = optimizer(model.parameters(), lr=args.lr * args.sts_lr_multiplier, weight_decay=args.sts_weight_decay)
     
     if args.fine_tune_mode == "iterative":
         # Lambda lr scheduler halves the learning rate every epoch (and also when unfreezing)
-        lambda_lr = lambda epoch: 0.5 ** epoch
+        lambda_lr = lambda epoch: args.lr_lambda ** epoch
         sst_scheduler = lr_scheduler.LambdaLR(sst_optimizer, lr_lambda=lambda_lr)
         para_scheduler = lr_scheduler.LambdaLR(para_optimizer, lr_lambda=lambda_lr)
         sts_scheduler = lr_scheduler.LambdaLR(sts_optimizer, lr_lambda=lambda_lr)
@@ -177,23 +181,23 @@ def train_multitask(args, benchmark=False):
         
         # ====================== Manage Iterative Unfreezing ==========================
         if args.fine_tune_mode == 'iterative':
-            checkpoint_slice = args.epochs // 5
-            if epoch < checkpoint_slice:
+            checkpoint_slice = args.epochs // 5   # no longer using this, but could evenly slice unfreezing
+            if epoch < 1:
                 model.manage_freezing('freezeall')
                 print(f"\n====== All BERT Layers Frozen ======\n")
-            elif epoch < checkpoint_slice * 2:
+            elif epoch < 2:
                 model.manage_freezing('unfreezetop3')
                 # sst_scheduler.step()
                 # para_scheduler.step()
                 # sts_scheduler.step()
                 print(f"\n====== Top 3 BERT Layers Unfrozen ======\n")
-            elif epoch < checkpoint_slice * 3:
+            elif epoch < 3:
                 model.manage_freezing('unfreezetop6')
                 # sst_scheduler.step()
                 # para_scheduler.step()
                 # sts_scheduler.step()
                 print(f"\n====== Top 6 BERT Layers Unfrozen ======\n")
-            elif epoch < checkpoint_slice * 4:
+            elif epoch < 4:
                 model.manage_freezing('unfreezetop9')
                 # sst_scheduler.step()
                 # para_scheduler.step()
@@ -535,8 +539,16 @@ def get_args():
     # dataset extra cleaning with nltk
     parser.add_argument("--extra_clean", action = 'store_true', default = False, help = "Perform extra nltk etc. data cleaning.")
 
-    # lr scheduling 
-    #TODO
+    # lr scheduling and optim
+    parser.add_argument("--sst_weight_decay", type=float, default=5e-3, help="Weight decay for SST sentiment dataset training")
+    parser.add_argument("--para_weight_decay", type=float, default=1e-5, help="Weight decay for paraphrase dataset training")
+    parser.add_argument("--sts_weight_decay", type=float, default=8e-3, help="Weight decay for STS dataset training")
+    parser.add_argument("--lr_lambda", type=float, default=0.5, help="Learning rate decay factor for each epoch")
+    parser.add_argument("--optim", type=str, choices=["RAdam", "Adamax"], default="Adamax", help="Optimizer to use (RAdam or Adamax)")
+    parser.add_argument("--sst_lr_multiplier", type=float, default=10, help="Learning rate multiplier for SST sentiment dataset")
+    parser.add_argument("--para_lr_multiplier", type=float, default=1.0, help="Learning rate multiplier for paraphrase dataset")
+    parser.add_argument("--sts_lr_multiplier", type=float, default=3, help="Learning rate multiplier for STS dataset")
+
 
     # dataset selections for training
     parser.add_argument("--train_sst", action='store_true', help='Train against SST sentiment dataset (CELoss)')
@@ -601,7 +613,7 @@ def append_results_to_csv(args, metrics):
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-multitask.pt' # Save path.
+    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-{args.optim}-{args.sst_lr_multiplier}-{args.para_lr_multiplier}-{args.sts_lr_multiplier}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     if args.benchmark:
         average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
@@ -632,4 +644,3 @@ if __name__ == "__main__":
     else:
         train_multitask(args)
         test_multitask(args)
-

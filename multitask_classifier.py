@@ -606,7 +606,7 @@ def get_args():
     parser.add_argument("--lr", type=float, help="Initial learning rate", default=1e-5)
 
     parser.add_argument("--lora_dict", type=str, default='{"mode": "none", "r": 0, "dora": 0}')
-    parser.add_argument("--benchmark-results", type=str, default="benchmark-results-dora-only.csv")
+    parser.add_argument("--benchmark-results", type=str, default="lora-dora-vs-r.csv")
 
     parser.add_argument("--benchmark", action='store_true', help='Benchmark the model for training time and memory usage')
     args = parser.parse_args()
@@ -615,7 +615,7 @@ def get_args():
     return args
 
 def append_results_to_csv(args, metrics):
-    fields = ['Total Accuracy', 'SST Dev Accuracy', 'Para Dev Accuracy', 'STS Dev Correlation', 'SST Time', 'Para Time', 'STS Time', 'SST Memory', 'Para Memory', 'STS Memory', 'LoRA Mode', 'LoRA R', 'DoRA', 'Batch Size', 'Learning Rate', 'Epochs', 'Fine-Tune Mode', 'Dropout Probability']
+    fields = ['Total Accuracy', 'SST Dev Accuracy', 'Para Dev Accuracy', 'STS Dev Correlation', 'SST Time', 'Para Time', 'STS Time', 'SST Memory', 'Para Memory', 'STS Memory', 'LoRA Mode', 'LoRA R', 'DoRA', 'Batch Size', 'Learning Rate', 'Epochs', 'Fine-Tune Mode', 'AMP', 'Dropout Probability']
     file_exists = os.path.isfile(args.benchmark_results)
     
     with open(args.benchmark_results, 'a', newline='') as csvfile:
@@ -632,6 +632,7 @@ if __name__ == "__main__":
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     if args.benchmark:
         average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory, sst_dev_acc, para_dev_acc, sts_dev_corr = train_multitask(args, args.benchmark)
+        sst_dev_acc, para_dev_acc, sts_dev_corr = test_multitask(args, args.benchmark)
 
         total_accuracy = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, 
                                             para_dev_acc if args.train_quora else 0, 
@@ -654,7 +655,8 @@ if __name__ == "__main__":
         'STS Dev Correlation': sts_dev_corr,
         'STS Time': average_sts_time,
         'STS Memory': average_sts_memory,
-        'Total Accuracy': total_accuracy
+        'Total Accuracy': total_accuracy,
+        'AMP': 1 if args.amp else 0
         }
         append_results_to_csv(args, metrics)
     else:

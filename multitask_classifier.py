@@ -59,6 +59,19 @@ def log_cosh_loss(preds, target):
     return torch.mean(log_cosh(preds - target))
 
 
+def predict_paraphrase_embeddings(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
+    '''Output embeddings instead of a logit for contrastive loss calculation.'''
+    embeds_1 = self.forward(input_ids_1, attention_mask_1)
+    embeds_2 = self.forward(input_ids_2, attention_mask_2)
+    return embeds_1, embeds_2
+
+
+def contrastive_loss(output1, output2, label, margin=1.0):
+    euclidean_distance = F.pairwise_distance(output1, output2)
+    loss = torch.mean((1 - label) * torch.pow(euclidean_distance, 2) +
+                      label * torch.pow(torch.clamp(margin - euclidean_distance, min=0.0), 2))
+    return loss
+
 
 def train_multitask(args, benchmark=False):
     device = torch.device('cpu')
@@ -269,10 +282,8 @@ def train_multitask(args, benchmark=False):
 
                 if args.amp:  # auto multi-precision
                     with torch.cuda.amp.autocast():
-                        logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
-                        b_labels = b_labels.flatten().float()  # reshape to match logits
-                        criterion = torch.nn.BCEWithLogitsLoss()  # more stable, can autocast
-                        loss = criterion(logits, b_labels)
+                        embeddings1, embeddings2 = model.predict_paraphrase_embeddings(b_ids1, b_mask1, b_ids2, b_mask2)
+                        loss = contrastive_loss(embeddings1, embeddings2, b_labels)
 
                     gradscaler.scale(loss).backward()
                     gradscaler.step(para_optimizer)

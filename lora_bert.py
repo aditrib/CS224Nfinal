@@ -1,3 +1,4 @@
+# DoRA code loosely inspired by https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/dora.py and https://github.com/catid/dora/blob/main/dora.py and 
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import *

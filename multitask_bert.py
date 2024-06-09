@@ -30,7 +30,7 @@ class MultitaskBERT(nn.Module):
         assert config.lora_dict['r'] > 0 or config.lora_dict['mode'] == 'none'
         assert config.lora_dict['dora'] in [0, 1]
         # LoRA settings
-        if config.fine_tune_mode != 'full-model' and config.lora_dict['mode'] != 'none':
+        if config.fine_tune_mode == 'last-layer' and config.lora_dict['mode'] != 'none':
             raise ValueError("LoRA can only be used in full-model fine-tuning mode.")
         
         # Pretrain mode does not require updating BERT parameters.
@@ -40,14 +40,28 @@ class MultitaskBERT(nn.Module):
             self.manage_freezing('unfreezeall')
         
         if config.lora_dict['mode'] != 'none':
-            self.bert_sentiment = inject_lora(self.bert_sentiment, 
-                                              config.lora_dict['mode'], 
-                                              config.lora_dict['r'], 
-                                              config.lora_dict['dora'])
-            self.bert_sim = inject_lora(self.bert_sim, 
-                                              config.lora_dict['mode'], 
-                                              config.lora_dict['r'], 
-                                              config.lora_dict['dora'])
+            if config.fine_tune_mode == 'iterative':
+                self.bert_sentiment = inject_lora(self.bert_sentiment, 
+                                                config.lora_dict['mode'], 
+                                                config.lora_dict['r'], 
+                                                config.lora_dict['dora'],
+                                                freeze = True)
+                self.bert_sim = inject_lora(self.bert_sim, 
+                                                config.lora_dict['mode'], 
+                                                config.lora_dict['r'], 
+                                                config.lora_dict['dora'],
+                                                freeze = True)
+            else:
+                self.bert_sentiment = inject_lora(self.bert_sentiment, 
+                                                config.lora_dict['mode'], 
+                                                config.lora_dict['r'], 
+                                                config.lora_dict['dora'],
+                                                freeze = False)
+                self.bert_sim = inject_lora(self.bert_sim, 
+                                                config.lora_dict['mode'], 
+                                                config.lora_dict['r'], 
+                                                config.lora_dict['dora'],
+                                                freeze = False)
 
         assert config.clf in ["linear", "nonlinear", "conv"]
         self.clf = config.clf
@@ -127,7 +141,7 @@ class MultitaskBERT(nn.Module):
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         
         
-    def manage_freezing(self, structure: str):
+    def manage_freezing(self, structure: str, lora_mode: str = 'none'):
         """ 
         Manages freezing of BERT Attention layers
   
@@ -199,6 +213,22 @@ class MultitaskBERT(nn.Module):
                     # print(children[i])
                     for param in attention_layers[i].parameters():
                         param.requires_grad = True
+                    # Refreeze if LoRA is enabled
+                    if lora_mode != 'none':
+                        for param in attention_layers[i].self_attention.query.original_linear.parameters():
+                            param.requires_grad = False
+                        for param in attention_layers[i].self_attention.key.original_linear.parameters():
+                            param.requires_grad = False
+                        for param in attention_layers[i].self_attention.value.original_linear.parameters():
+                            param.requires_grad = False
+                        if lora_mode in ['all-lin', 'all-lin-only']:
+                            for param in attention_layers[i].attention_dense.original_linear.parameters():
+                                param.requires_grad = False
+                            for param in attention_layers[i].interm_dense.original_linear.parameters():
+                                param.requires_grad = False
+                            for param in attention_layers[i].out_dense.original_linear.parameters():
+                                param.requires_grad = False
+
             else:
                 raise ValueError(
                     (

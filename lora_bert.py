@@ -62,7 +62,7 @@ def inject_lora(bert_model, mode, r, dora = False, freeze = False):
 
         if mode in ['all-lin', 'all-lin-only']:
             # Other linear layers
-            layer.attention_dense = LoRALinear(layer.atten_dense, r, dora, freeze)
+            layer.attention_dense = LoRALinear(layer.attention_dense, r, dora, freeze)
             layer.interm_dense = LoRALinear(layer.interm_dense, r, dora, freeze)
             layer.out_dense = LoRALinear(layer.out_dense, r, dora, freeze)
     return bert_model

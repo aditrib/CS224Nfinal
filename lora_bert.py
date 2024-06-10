@@ -1,9 +1,10 @@
+# DoRA code loosely inspired by https://github.com/huggingface/peft/blob/main/src/peft/tuners/lora/dora.py and https://github.com/catid/dora/blob/main/dora.py and 
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import *
         
 class LoRALinear(nn.Module):
-    def __init__(self, original_linear, r, dora = False):
+    def __init__(self, original_linear, r, dora = False, freeze = False):
         super(LoRALinear, self).__init__()
         self.original_linear = original_linear  # Keep the original layer
         self.dora = dora
@@ -23,7 +24,15 @@ class LoRALinear(nn.Module):
             nn.init.zeros_(self.lora_B.weight)
 
             if dora:
-                self.magnitude = nn.Parameter(torch.ones(out_features, 1))
+                col_norms = self.original_linear.weight.norm(p=2, dim=0, keepdim=True)
+                self.magnitude = nn.Parameter(col_norms)
+            if freeze:
+                for param in self.lora_A.parameters():
+                    param.requires_grad = False
+                for param in self.lora_B.parameters():
+                    param.requires_grad = False
+                if self.magnitude is not None:
+                    self.magnitude.requires_grad = False
         else:
             self.lora_A = None
             self.lora_B = None
@@ -34,9 +43,9 @@ class LoRALinear(nn.Module):
             if self.dora:
                 lora_weights = self.lora_B.weight @ self.lora_A.weight
                 updated_weights = self.original_linear.weight + lora_weights
-                norms = updated_weights.norm(p=2, dim=0, keepdim=True)
-                direction = updated_weights / norms
-                scaled_weights = self.magnitude * direction
+                col_norms = updated_weights.norm(p=2, dim=0, keepdim=True)
+                direction = updated_weights / col_norms     
+                scaled_weights = self.magnitude * direction   
                 return F.linear(x, scaled_weights, self.original_linear.bias)
             else:
                 lora_update = self.lora_B(self.lora_A(x))
@@ -45,15 +54,16 @@ class LoRALinear(nn.Module):
             return original_output
 
     
-def inject_lora(bert_model, mode, r, dora = False):
+def inject_lora(bert_model, mode, r, dora = False, freeze = False):
     for layer in bert_model.bert_layers:
         # Transformer layers
-        layer.self_attention.query = LoRALinear(layer.self_attention.query, r, dora)
-        layer.self_attention.key = LoRALinear(layer.self_attention.key, r, dora)
-        layer.self_attention.value = LoRALinear(layer.self_attention.value, r, dora)
+        layer.self_attention.query = LoRALinear(layer.self_attention.query, r, dora, freeze)
+        layer.self_attention.key = LoRALinear(layer.self_attention.key, r, dora, freeze)
+        layer.self_attention.value = LoRALinear(layer.self_attention.value, r, dora, freeze)
 
         if mode in ['all-lin', 'all-lin-only']:
             # Other linear layers
-            layer.interm_dense = LoRALinear(layer.interm_dense, r, dora)
-            layer.out_dense = LoRALinear(layer.out_dense, r, dora)
+            layer.attention_dense = LoRALinear(layer.attention_dense, r, dora, freeze)
+            layer.interm_dense = LoRALinear(layer.interm_dense, r, dora, freeze)
+            layer.out_dense = LoRALinear(layer.out_dense, r, dora, freeze)
     return bert_model

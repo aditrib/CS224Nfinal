@@ -11,4 +11,3 @@ __pycache__/utils.cpython-38.pyc
 *.pdf 
 *.zip
 tensorboard_logs/*
-predictions/*

@@ -1,0 +1,106 @@
+Script started on 2024-06-08 22:23:08+00:00 [TERM="xterm-256color" TTY="/dev/pts/8" COLUMNS="150" LINES="24"]
+[?2004h(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ ls
+[?2004lLICENSE
+README.md
+[0m[01;34m__pycache__[0m
+base_bert.py
+bert.py
+classifier.py
+config.py
+[01;31mcs224n_default_final_project_submission.zip[0m
+[01;34mdata[0m
+datasets.py
+[01;34mduality-of-man-models[0m
+duality_yinyang.txt
+ensemble.py
+evaluation.py
+[01;34mexperimental_models[0m
+full-model-7-0.00015-conv-Adamax-5.0-5.0-2.0-multitask.pt
+g6-yang-yin.pt
+g6-yin-yang-fast.pt
+g6-yin-yang-og.pt
+g6-yin-yang.pt
+[01;32mg6_duality.sh[0m
+[01;32mg6_yinyang.sh[0m
+globals.py
+iterative-10-0.0001-conv-multitask.pt
+iterative-7-0.0001-conv-Adamax-3.0-8.0-1.0-multitask.pt
+iterative-7-0.0001-conv-Adamax-4.0-5.0-3.0-multitask.pt
+[01;34mlogs[0m
+[01;34mlora_benchmark[0m
+lora_bert.py
+more_utils.py
+multitask_bert.py
+multitask_classifier.py
+[01;34mold_models[0m
+optimizer.py
+optimizer_test.npy
+optimizer_test.py
+[01;34mpredictions[0m
+prepare_submit.py
+sanity_check.data
+sanity_check.py
+[01;32msetup.sh[0m
+[01;34mtensorboard_logs[0m
+tokenizer.py
+utils.py
+[?2004h(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ git status
+[?2004lOn branch danielfrees
+Your branch is up to date with 'origin/danielfrees'.
+
+Changes not staged for commit:
+  (use "git add/rm <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	[31mdeleted:    benchmark-results.csv[m
+	[31mdeleted:    benchmark.sh[m
+	[31mdeleted:    g6_darkarts.sh[m
+	[31mmodified:   g6_yinyang.sh[m
+	[31mmodified:   predictions/para-dev-output.csv[m
+	[31mmodified:   predictions/para-test-output.csv[m
+	[31mmodified:   predictions/sst-dev-output.csv[m
+	[31mmodified:   predictions/sst-test-output.csv[m
+	[31mmodified:   predictions/sts-dev-output.csv[m
+	[31mmodified:   predictions/sts-test-output.csv[m
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	[31mduality_yinyang.txt[m
+	[31mexperimental_models/[m
+	[31mg6_duality.sh[m
+
+no changes added to commit (use "git add" and/or "git commit -a")
+[?2004h(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ [K(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ ls
+[?2004lLICENSE                                                    g6-yin-yang-steady-hand.pt
+README.md                                                  g6-yin-yang.pt
+[0m[01;34m__pycache__[0m                                                [01;32mg6_duality.sh[0m
+base_bert.py                                               [01;32mg6_interleaver.sh[0m
+bert.py                                                    [01;32mg6_run_it_back.sh[0m
+classifier.py                                              [01;32mg6_yinyang.sh[0m
+config.py                                                  globals.py
+[01;31mcs224n_default_final_project_submission.zip[0m                iterative-10-0.0001-conv-multitask.pt
+[01;34mdata[0m                                                       iterative-7-0.0001-conv-Adamax-4.0-1.0-3.0-2-1-5-multitask.pt
+datasets.py                                                iterative-7-0.0001-conv-RAdam-4.0-1.0-3.0-5-1-5-multitask.pt
+duality-of-fast-man.pt                                     iterative-7-0.0001-conv-RAdam-4.0-1.0-3.0-multitask.pt
+duality-of-long-distance-runners-20.pt                     iterative-7-0.0001-conv-RAdam-4.0-5.0-3.0-multitask.pt
+[01;34mduality-of-man-models[0m                                      iterative-7-0.0001-conv-RAdam-7.0-1.0-3.0-5-1-5-multitask.pt
+duality-of-man-nonlinear.pt                                [01;34mlogs[0m
+duality-of-robust-men.pt                                   [01;34mlora_benchmark[0m
+duality-of-slow-man.pt                                     lora_bert.py
+duality_yinyang.txt                                        more_utils.py
+ensemble.py                                                multitask_bert.py
+evaluation.py                                              multitask_classifier.py
+[01;34mexperimental_models[0m                                        [01;34mold_models[0m
+full-model-7-0.00015-conv-Adamax-5.0-5.0-2.0-multitask.pt  optimizer.py
+g6-duality-of-man.pt                                       optimizer_test.npy
+g6-interleaver-2.pt                                        optimizer_test.py
+g6-interleaver-fast.pt                                     [01;34mpredictions[0m
+g6-interleaver-more-para.pt                                prepare_submit.py
+g6-interleaver-steady-hand.pt                              sanity_check.data
+g6-interleaver-the-parabola.pt                             sanity_check.py
+g6-interleaver.pt                                          [01;32msetup.sh[0m
+g6-yang-yin-the-parabola.pt                                sst_error_check.py
+g6-yang-yin.pt                                             [01;34mtensorboard_logs[0m
+g6-yin-yang-2.pt                                           tokenizer.py
+g6-yin-yang-fast.pt                                        utils.py
+g6-yin-yang-og.pt
+[?2004h(base) ]0;ubuntu@129-213-144-174: ~/vi-dmf-deeplearning/CS224Nfinal[01;32mubuntu@129-213-144-174[00m:[01;34m~/vi-dmf-deeplearning/CS224Nfinal[00m$ lsgit statusls[K/bin/python /home/ubuntu/.vscode-server/extensions/ms-python.python-2024.8.0/python_files/printEnvVariablesToFile.py /home/ubuntu/.vscode-server/extensions/ms-python.python-2024.8.0/python_files/deactivate/bash/envVars.txt[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C

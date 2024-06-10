@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from bert import BertModel
 from lora_bert import inject_lora
+import copy
 
 
 from globals import BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES
@@ -20,8 +21,10 @@ class MultitaskBERT(nn.Module):
     '''
     def __init__(self, config):
         super(MultitaskBERT, self).__init__()
-        self.bert_sentiment = BertModel.from_pretrained('bert-base-uncased')
-        self.bert_sim = BertModel.from_pretrained('bert-base-uncased')
+        
+        NUM_BERTS = config.num_berts
+        assert NUM_BERTS >= 1, "Must have >=1 backbone."
+        self.berts = nn.ModuleList([BertModel.from_pretrained('bert-base-uncased') for _ in range(NUM_BERTS)])
         # last-layer mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-layer", "full-model", "iterative"]
         
@@ -40,12 +43,8 @@ class MultitaskBERT(nn.Module):
             self.manage_freezing('unfreezeall')
         
         if config.lora_dict['mode'] != 'none':
-            self.bert_sentiment = inject_lora(self.bert_sentiment, 
-                                              config.lora_dict['mode'], 
-                                              config.lora_dict['r'], 
-                                              config.lora_dict['dora'])
-            self.bert_sim = inject_lora(self.bert_sim, 
-                                              config.lora_dict['mode'], 
+            for bert in self.berts:
+                bert = inject_lora(bert, config.lora_dict['mode'], 
                                               config.lora_dict['r'], 
                                               config.lora_dict['dora'])
 
@@ -53,81 +52,68 @@ class MultitaskBERT(nn.Module):
         self.clf = config.clf
         # You will want to add layers here to perform the downstream tasks.
         ### 
-
-
-        FEATURE_SIZE = 4 * BERT_HIDDEN_SIZE + 1
-        FEATURE_PROJ_SIZE = (FEATURE_SIZE - 1) //2
         
-        # ===== sentiment =====
-        self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
-        self.sentiment_nonlinear = nn.Sequential(
-            nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE//2),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES)
-        )
-
-        self.sentiment_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.BatchNorm1d(4),
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
-            nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, N_SENTIMENT_CLASSES)  
-        )
-
-        # ====== comparison task shared layer ======
+        EMBEDDINGS_SIZE = NUM_BERTS * BERT_HIDDEN_SIZE  # we concatenate NUM_BERTS embeddings # NOT RN-> : then project to lower dimension
+        FEATURES_SIZE = 2 * EMBEDDINGS_SIZE + 1
+        
+        # ===== helper layers ======
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         # learn linear mapping which can be shared among STS and Quora tasks for comparison features
         self.comparison_features_fcn = nn.Sequential(
-            nn.Linear(FEATURE_SIZE, FEATURE_PROJ_SIZE),
-            nn.BatchNorm1d(FEATURE_PROJ_SIZE),
+            nn.Linear(FEATURES_SIZE, FEATURES_SIZE),
             nn.ReLU(),
-            nn.Linear(FEATURE_PROJ_SIZE, FEATURE_PROJ_SIZE),
-            nn.BatchNorm1d(FEATURE_PROJ_SIZE)
+            nn.Linear(FEATURES_SIZE, FEATURES_SIZE)
         )
-
+        self.embeddings_linear = nn.Linear(EMBEDDINGS_SIZE*2, EMBEDDINGS_SIZE)
+        self.embeddings_fcn = nn.Sequential(
+            nn.Linear(EMBEDDINGS_SIZE*2, EMBEDDINGS_SIZE),
+            nn.ReLU(),
+            nn.Linear(EMBEDDINGS_SIZE, EMBEDDINGS_SIZE)
+        )
+        # ===== sentiment =====
+        self.sentiment_linear = nn.Linear(EMBEDDINGS_SIZE, N_SENTIMENT_CLASSES)
+        self.sentiment_nonlinear = nn.Sequential(nn.Linear(EMBEDDINGS_SIZE, EMBEDDINGS_SIZE//2),
+                                        nn.ReLU(),
+                                        nn.Linear(EMBEDDINGS_SIZE//2, N_SENTIMENT_CLASSES))
+        
+        self.sentiment_conv = nn.Sequential(
+            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
+            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
+            nn.Linear(4 * (EMBEDDINGS_SIZE - 2), EMBEDDINGS_SIZE * 2),  
+            nn.ReLU(),  
+            nn.Linear(EMBEDDINGS_SIZE * 2, N_SENTIMENT_CLASSES)  
+        )
+        
+            
         # ===== paraphrase ======
-        self.paraphrase_linear = nn.Linear(FEATURE_PROJ_SIZE, 1)
-        self.paraphrase_nonlinear = nn.Sequential(
-            nn.Linear(FEATURE_PROJ_SIZE, BERT_HIDDEN_SIZE),
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE, 1)
-        )
+        self.paraphrase_linear = nn.Linear(FEATURES_SIZE, 1)
+        self.paraphrase_nonlinear = nn.Sequential(nn.Linear(FEATURES_SIZE, FEATURES_SIZE//2),
+                                        nn.ReLU(),
+                                        nn.Linear(FEATURES_SIZE//2, 1))
         self.paraphrase_conv =  nn.Sequential(
             nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.BatchNorm1d(4),
             nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (FEATURE_PROJ_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
+            nn.Linear(4 * (FEATURES_SIZE - 2), FEATURES_SIZE * 2),  
             nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
+            nn.Linear(FEATURES_SIZE * 2, 1)  
         )
+        
 
         # ===== similarity ========
-        self.similarity_linear = nn.Linear(FEATURE_PROJ_SIZE, 1)
-        self.similarity_nonlinear = nn.Sequential(
-            nn.Linear(FEATURE_PROJ_SIZE, BERT_HIDDEN_SIZE),
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE, 1)
-        )
+        self.similarity_linear = nn.Linear(FEATURES_SIZE, 1)
+        self.similarity_nonlinear = nn.Sequential(nn.Linear(FEATURES_SIZE, FEATURES_SIZE//2),
+                                        nn.ReLU(),
+                                        nn.Linear(FEATURES_SIZE//2, 1))
         self.similarity_conv = nn.Sequential(
             nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3), # note: input needs to be unsqueezed
-            nn.BatchNorm1d(4),
             nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (FEATURE_PROJ_SIZE - 2), BERT_HIDDEN_SIZE // 2),  
-            nn.BatchNorm1d(BERT_HIDDEN_SIZE // 2),
+            nn.Linear(4 * (FEATURES_SIZE - 2), FEATURES_SIZE * 2),  
             nn.ReLU(),  
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)  
+            nn.Linear(FEATURES_SIZE * 2, 1)  
         )
 
-        # ===== helper layers ======
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         
-        
-    def manage_freezing(self, structure: str, lora_mode: str = 'none'):
+    def manage_freezing(self, structure: str):
         """ 
         Manages freezing of BERT Attention layers
   
@@ -147,7 +133,7 @@ class MultitaskBERT(nn.Module):
             ValueError: If the structure parameter does not follow the expected
                 format or specifies an invalid option.
         """
-        for bert in (self.bert_sentiment, self.bert_sim):
+        for bert in self.berts:
             children = list(bert.children())
             # The ModuleList containing the 12 self-attention layers is at index 5
             attn_idx = 5
@@ -199,22 +185,6 @@ class MultitaskBERT(nn.Module):
                     # print(children[i])
                     for param in attention_layers[i].parameters():
                         param.requires_grad = True
-                    # Refreeze if LoRA is enabled
-                    if lora_mode != 'none':
-                        for param in attention_layers[i].self_attention.query.original_linear.parameters():
-                            param.requires_grad = False
-                        for param in attention_layers[i].self_attention.key.original_linear.parameters():
-                            param.requires_grad = False
-                        for param in attention_layers[i].self_attention.value.original_linear.parameters():
-                            param.requires_grad = False
-                        if lora_mode in ['all-lin', 'all-lin-only']:
-                            for param in attention_layers[i].attention_dense.original_linear.parameters():
-                                param.requires_grad = False
-                            for param in attention_layers[i].interm_dense.original_linear.parameters():
-                                param.requires_grad = False
-                            for param in attention_layers[i].out_dense.original_linear.parameters():
-                                param.requires_grad = False
-
             else:
                 raise ValueError(
                     (
@@ -225,7 +195,7 @@ class MultitaskBERT(nn.Module):
         return None
         
 
-    def forward(self, input_ids, attention_mask, which_bert):
+    def forward(self, input_ids, attention_mask):
         """Takes a batch of sentences and produces embeddings for them.
         
         which_bert - indicate which bert backbone to update
@@ -237,15 +207,12 @@ class MultitaskBERT(nn.Module):
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
         ### TODO
-        if which_bert == "sentiment":
-            outputs = self.bert_sentiment(input_ids=input_ids, attention_mask=attention_mask)
-            embeddings = outputs['pooler_output'] 
-        elif which_bert == "sim":
-            outputs = self.bert_sim(input_ids=input_ids, attention_mask=attention_mask)
-            embeddings = outputs['pooler_output'] 
-        else:
-            raise ValueError("`which_bert` must be one of 'sentiment', 'sim'.")
-        return embeddings
+        embeddings = []
+        for bert in self.berts:
+            embeddings.append(bert(input_ids=input_ids, attention_mask=attention_mask)['pooler_output'])
+        all_embeds = torch.concat(embeddings, dim = 1)
+        # all_embeds = self.embeddings_linear(all_embeds)
+        return all_embeds
     
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -255,7 +222,7 @@ class MultitaskBERT(nn.Module):
         Thus, your output should contain 5 logits for each sentence.
         '''
         ### TODO
-        embeddings = self.forward(input_ids, attention_mask, which_bert = "sentiment")
+        embeddings = self.forward(input_ids, attention_mask)
         
         if self.clf == "linear":
             out = self.sentiment_linear(embeddings)
@@ -274,12 +241,12 @@ class MultitaskBERT(nn.Module):
         Useful for both Sim tasks.
         """
         
-        embeds_1 = self.forward(input_ids_1, attention_mask_1, which_bert = "sim")
-        embeds_2 = self.forward(input_ids_2, attention_mask_2, which_bert = "sim")
+        embeds_1 = self.forward(input_ids_1, attention_mask_1)
+        embeds_2 = self.forward(input_ids_2, attention_mask_2)
         cosine_sim = F.cosine_similarity(embeds_1, embeds_2).unsqueeze(-1)
         elem_prods = embeds_1 * embeds_2
         diff = torch.abs(embeds_1 - embeds_2)
-        features = torch.cat([embeds_1, embeds_2, diff, elem_prods, cosine_sim], dim=1)
+        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
         features = self.comparison_features_fcn(features)
         
         return features
@@ -324,82 +291,20 @@ class MultitaskBERT(nn.Module):
             out = self.similarity_conv(torch.unsqueeze(features, 1))
         return out
     
-# ====== G6 Duality of Man =======
-class MultitaskBERTDualityOfMan(MultitaskBERT):
-    def __init__(self, config):
-        super(MultitaskBERTDualityOfMan, self).__init__(config)
-        
-        # ===== sentiment =====
-        self.sentiment_linear = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
-        self.sentiment_nonlinear = nn.Sequential(
-            nn.Linear(BERT_HIDDEN_SIZE, BERT_HIDDEN_SIZE//2),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE//2, N_SENTIMENT_CLASSES)
-        )
-
-        self.sentiment_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (BERT_HIDDEN_SIZE - 2), BERT_HIDDEN_SIZE // 2),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE // 2, N_SENTIMENT_CLASSES)
-        )
-
-        # ====== comparison task shared layer ======
-        # learn linear mapping which can be shared among STS and Quora tasks for comparison features
-        self.comparison_features_fcn = nn.Sequential(
-            nn.Linear(2*BERT_HIDDEN_SIZE + 1, 2*BERT_HIDDEN_SIZE + 1),
-            nn.ReLU(),
-            nn.Linear(2*BERT_HIDDEN_SIZE + 1, 2*BERT_HIDDEN_SIZE + 1)
-        )
-
-        # ===== paraphrase ======
-        self.paraphrase_linear = nn.Linear(2*BERT_HIDDEN_SIZE + 1, 1)
-        self.paraphrase_nonlinear = nn.Sequential(
-            nn.Linear(2*BERT_HIDDEN_SIZE + 1, BERT_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE, 1)
-        )
-        self.paraphrase_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (2*BERT_HIDDEN_SIZE + 1 - 2), BERT_HIDDEN_SIZE // 2),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)
-        )
-
-        # ===== similarity ========
-        self.similarity_linear = nn.Linear(2*BERT_HIDDEN_SIZE + 1, 1)
-        self.similarity_nonlinear = nn.Sequential(
-            nn.Linear(2*BERT_HIDDEN_SIZE + 1, BERT_HIDDEN_SIZE),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE, 1)
-        )
-        self.similarity_conv = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=4, kernel_size=3),  # note: input needs to be unsqueezed
-            nn.Flatten(),  # Flatten layer to convert (N, 4, D-2) to (N, 4*(D-2))
-            nn.Linear(4 * (2*BERT_HIDDEN_SIZE + 1 - 2), BERT_HIDDEN_SIZE // 2),
-            nn.ReLU(),
-            nn.Linear(BERT_HIDDEN_SIZE // 2, 1)
-        )
-
-        # ===== helper layers ======
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-
-    def extract_comparison_features(self,
-                                    input_ids_1, attention_mask_1,
-                                    input_ids_2, attention_mask_2):
-        """ 
-        Given a batch of pairs of sentences, extract comparison features for Quora and STS tasks.
-        
-        Useful for both Sim tasks.
-        """
-        embeds_1 = self.forward(input_ids_1, attention_mask_1, which_bert="sim")
-        embeds_2 = self.forward(input_ids_2, attention_mask_2, which_bert="sim")
-        cosine_sim = F.cosine_similarity(embeds_1, embeds_2).unsqueeze(-1)
-        elem_prods = embeds_1 * embeds_2
-        diff = torch.abs(embeds_1 - embeds_2)
-        features = torch.cat([diff, elem_prods, cosine_sim], dim=1)
-        features = self.comparison_features_fcn(features)
-        return features
     
+# ===== for EMA =====
+class EMA:
+    def __init__(self, model, decay):
+        self.model = model
+        self.decay = decay
+        self.shadow = copy.deepcopy(model.state_dict())
+        self.ema_model = copy.deepcopy(model)
+
+    def update(self):
+        for name, param in self.model.state_dict().items():
+            if name in self.shadow:
+                self.shadow[name] = self.decay * self.shadow[name] + (1.0 - self.decay) * param
+
+    def apply_shadow(self):
+        self.ema_model.load_state_dict(self.shadow)
+        return self.ema_model

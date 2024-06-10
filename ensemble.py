@@ -24,16 +24,16 @@ class EnsembledModel(nn.Module):
     def predict_sentiment(self, input_ids, attention_mask):
         with torch.no_grad():
             logits = torch.stack([model.predict_sentiment(input_ids, attention_mask) for model in self.models], dim=0)
-            return torch.round(torch.mean(logits, dim=0)).int()
+            return torch.mean(logits, dim=0).squeeze()
 
     def predict_paraphrase(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
         with torch.no_grad():
             logits = torch.stack([model.predict_paraphrase(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2) for model in self.models], dim=0)
-            return torch.round(torch.mean(logits, dim=0)).int()
+            return torch.mean(logits, dim=0).squeeze()
 
     def predict_similarity(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
         with torch.no_grad():
-            logits = torch.stack([model.predict_similarity(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2).unsqueeze(-1) for model in self.models], dim=0)
+            logits = torch.stack([model.predict_similarity(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2) for model in self.models], dim=0)
             return torch.mean(logits, dim=0).squeeze()
 
 
@@ -43,7 +43,7 @@ def load_models(filepaths, device):
         print(f"====== Loading Model: {filepath} ======")
         saved = torch.load(filepath, map_location=device)
         config = saved['model_config']
-        if "duality" in args.filepath:
+        if "duality" in filepath:
             model = MultitaskBERTDualityOfMan(config)
         else:
             model = MultitaskBERT(config)

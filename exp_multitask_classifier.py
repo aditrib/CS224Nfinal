@@ -32,7 +32,7 @@ from datasets import (
     load_multitask_data
 )
 from evaluation import model_eval_sst, model_eval_para, model_eval_sts, model_eval_multitask, model_eval_test_multitask, get_leaderboard_score
-from multitask_bert import MultitaskBERT
+from multitask_bert import MultitaskBERT, EMA
 import time
 import warnings
 import os
@@ -40,6 +40,8 @@ import json
 import csv
 from datetime import datetime
 from more_utils import seed_everything, save_model
+from spacecutter.losses import CumulativeLinkLoss
+from copy import copy
 
 from globals import BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES, TQDM_DISABLE
 
@@ -58,6 +60,18 @@ def log_cosh_loss(preds, target):
         return x + torch.nn.functional.softplus(-2. * x) - torch.log(torch.tensor(2.0))
     return torch.mean(log_cosh(preds - target))
 
+
+# =========== additional loss funcs for SST (sent) ========
+class OrdinalCrossEntropyLoss(nn.Module):
+    def __init__(self):
+        super(OrdinalCrossEntropyLoss, self).__init__()
+
+    def forward(self, logits, targets):
+        targets_one_hot = F.one_hot(targets, num_classes=logits.size(1)).float()
+        # Create cumulative probability for each class
+        cumulative_probs = torch.cumsum(F.softmax(logits, dim=1), dim=1)
+        loss = - torch.sum(targets_one_hot * torch.log(cumulative_probs) + (1 - targets_one_hot) * torch.log(1 - cumulative_probs))
+        return loss 
 
 
 def train_multitask(args, benchmark=False):
@@ -92,11 +106,12 @@ def train_multitask(args, benchmark=False):
     sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size, collate_fn=sts_train_data.collate_fn)
     sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size, collate_fn=sts_dev_data.collate_fn)
 
-    # Initialize model
+    # =================== Initialize model =====================
     config = {
         'hidden_dropout_prob': args.hidden_dropout_prob,
         'num_labels': num_labels,
         'hidden_size': 768,
+        'num_berts': args.num_berts,
         'data_dir': '.',
         'fine_tune_mode': args.fine_tune_mode,
         'clf': args.clf,
@@ -104,6 +119,10 @@ def train_multitask(args, benchmark=False):
     config = SimpleNamespace(**config)
     model = MultitaskBERT(config)
     model = model.to(device)
+    
+    if args.use_ema:
+        decay = 0.999
+        ema = EMA(model, decay = decay)   # smaller decay beta since we use few epochs
 
 
     # ============= Optimizer and LR =================
@@ -132,27 +151,37 @@ def train_multitask(args, benchmark=False):
     # optimizer = optim.SparseAdam(model.parameters(), lr=args.lr)
 
     # Adamax: a variant of Adam based on the infinity norm, suitable for embeddings and sparse data
-    if args.optim == "Adamax":
-        optimizer = optim.Adamax
-    elif args.optim == "RAdam":
-        optimizer = optim.RAdam
-    elif args.optim == "SGD":
-        optimizer = optim.SGD(nesterov=True)
-    sst_optimizer = optimizer(model.parameters(), lr=args.lr * args.sst_lr_multiplier, weight_decay=args.sst_weight_decay)   # SST needs larger learning rate
-    para_optimizer = optimizer(model.parameters(), lr=args.lr * args.para_lr_multiplier, weight_decay=args.para_weight_decay)
-    sts_optimizer = optimizer(model.parameters(), lr=args.lr * args.sts_lr_multiplier, weight_decay=args.sts_weight_decay)
+    SST_LR_SCALE = 5
+    PARA_LR_SCALE = 1
+    STS_LR_SCALE = 3
+    sst_lr = SST_LR_SCALE * args.lr
+    para_lr = PARA_LR_SCALE * args.lr
+    sts_lr = STS_LR_SCALE * args.lr
+    sst_optimizer = optim.Adamax(model.parameters(), lr=sst_lr, weight_decay=1e-5)   # SST needs larger learning rate
+    para_optimizer = optim.Adamax(model.parameters(), lr=para_lr, weight_decay=1e-3)
+    sts_optimizer = optim.RAdam(model.parameters(), lr=sts_lr, weight_decay=5e-4)
+    
+    CYCLE_LENGTH = args.epochs // 5  # Adjust cycle length based on your epochs
+    
     
     if args.fine_tune_mode == "iterative":
         # Lambda lr scheduler halves the learning rate every epoch (and also when unfreezing)
-        lambda_lr = lambda epoch: args.lr_lambda ** epoch
-        sst_scheduler = lr_scheduler.LambdaLR(sst_optimizer, lr_lambda=lambda_lr)
-        para_scheduler = lr_scheduler.LambdaLR(para_optimizer, lr_lambda=lambda_lr)
-        sts_scheduler = lr_scheduler.LambdaLR(sts_optimizer, lr_lambda=lambda_lr)
+        sst_scheduler = lr_scheduler.LambdaLR(sst_optimizer, lr_lambda=lambda epoch: 0.7 ** epoch)
+        para_scheduler = lr_scheduler.LambdaLR(para_optimizer, lr_lambda=lambda epoch: 0.7 ** epoch)
+        sts_scheduler = lr_scheduler.LambdaLR(sts_optimizer, lr_lambda=lambda epoch: 0.5 ** epoch)
+        
+        # Deleted cyclic LR it was trash
+        
+        # Cosine
+        
+        # sst_scheduler = lr_scheduler.CosineAnnealingLR(sst_optimizer, T_max=args.epochs, eta_min=sst_lr/ 5)
+        # para_scheduler = lr_scheduler.CosineAnnealingLR(para_optimizer, T_max=args.epochs, eta_min=para_lr / 4)
+        # sts_scheduler = lr_scheduler.CosineAnnealingLR(sts_optimizer, T_max=args.epochs, eta_min=sts_lr / 4)
     else:
         # Cosine Annealing
-        sst_scheduler = lr_scheduler.CosineAnnealingLR(sst_optimizer, T_max=args.epochs, eta_min=args.lr / 5)
-        para_scheduler = lr_scheduler.CosineAnnealingLR(para_optimizer, T_max=args.epochs, eta_min=args.lr / 4)
-        sts_scheduler = lr_scheduler.CosineAnnealingLR(sts_optimizer, T_max=args.epochs, eta_min=args.lr / 4)
+        sst_scheduler = lr_scheduler.CosineAnnealingLR(sst_optimizer, T_max=args.epochs, eta_min=sst_lr/ 5)
+        para_scheduler = lr_scheduler.CosineAnnealingLR(para_optimizer, T_max=args.epochs, eta_min=para_lr / 4)
+        sts_scheduler = lr_scheduler.CosineAnnealingLR(sts_optimizer, T_max=args.epochs, eta_min=sts_lr / 4)
 
         
     # =================================================
@@ -183,61 +212,132 @@ def train_multitask(args, benchmark=False):
         
         # ====================== Manage Iterative Unfreezing ==========================
         if args.fine_tune_mode == 'iterative':
-            checkpoint_slice = args.epochs // 5   # no longer using this, 
-                                #but can be used for 'even-slice' unfreezing
-            if epoch < 1:
+            if args.iterative_quora:
+                args.train_quora = False     # quora training doesn't work well without unfreezing
+            checkpoint_slice = CYCLE_LENGTH
+            if epoch < checkpoint_slice // 2:
                 model.manage_freezing('freezeall')
                 print(f"\n====== All BERT Layers Frozen ======\n")
-            elif epoch < 2:
+            elif epoch < checkpoint_slice * 2:
+                if args.iterative_quora:
+                    args.train_quora = True
                 model.manage_freezing('unfreezetop3')
                 print(f"\n====== Top 3 BERT Layers Unfrozen ======\n")
-            elif epoch < 3:
+            elif epoch < checkpoint_slice * 3:
                 model.manage_freezing('unfreezetop6')
                 print(f"\n====== Top 6 BERT Layers Unfrozen ======\n")
-            elif epoch < 4:
+            elif epoch < checkpoint_slice * 4:
                 model.manage_freezing('unfreezetop9')
                 print(f"\n====== Top 9 BERT Layers Unfrozen ======\n")
             else:
                 model.manage_freezing('unfreezeall')
-                print(f"\n====== All BERT Layers Unfrozen ======\n")   
-                # 12 total attn layers and early layers including Embeddings
+                print(f"\n====== All BERT Layers Unfrozen ======\n")   # 12 total attn layers
         
         
         model.train()  # put model in training mode
 
         if benchmark:
             torch.cuda.reset_peak_memory_stats()
+            
+        global_batch_counter = 0  # Initialize the global batch counter
+        total_global_batches = 0
+        if args.train_sst:
+            total_global_batches += len(sst_train_dataloader)
+        if args.train_quora: 
+            total_global_batches += len(para_train_dataloader)
+        if args.train_sts:
+            total_global_batches += len(sts_train_dataloader)
+
         if args.train_sst:
             print(f"\n================== Training SST (Epoch {epoch}) ==================\n")
             sst_train_loss = 0
             sst_num_batches = 0
        
             start_time = time.time()
-            for i in range(args.num_sst_trains):
-                for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-                    b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
-                    b_ids = b_ids.to(device)
-                    b_mask = b_mask.to(device)
-                    b_labels = b_labels.to(device)
+            for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                b_ids, b_mask, b_labels = (batch['token_ids'], batch['attention_mask'], batch['labels'])
+                b_ids = b_ids.to(device)
+                b_mask = b_mask.to(device)
+                b_labels = b_labels.to(device)
+                
+                # ======= various criterion options ==========
+                criterion_ce = nn.CrossEntropyLoss(reduction='mean')  # Cross Entropy Loss
+                criterion_bce = nn.BCEWithLogitsLoss(reduction='mean')  # Binary Cross Entropy Loss
+                criterion_kl = nn.KLDivLoss(reduction='batchmean')  # Kullback-Leibler Divergence Loss
+                criterion_ord = OrdinalCrossEntropyLoss()
+                # criterion_cumlink = CumulativeLinkLoss() # trash
 
-                    sst_optimizer.zero_grad()
+                # SELECT AN CRITERION MY GOOD SIR!
+                criterion = criterion_bce
+                
 
-                    if args.amp:  # auto multi-precision
-                        with torch.cuda.amp.autocast():
-                            logits = model.predict_sentiment(b_ids, b_mask)
-                            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+                sst_optimizer.zero_grad()
 
-                        gradscaler.scale(loss).backward()
-                        gradscaler.step(sst_optimizer)
-                        gradscaler.update()
-                    else:  # vanilla
+                if args.amp:  # auto mixed-precision
+                    with torch.cuda.amp.autocast():
                         logits = model.predict_sentiment(b_ids, b_mask)
-                        loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
-                        loss.backward()
-                        sst_optimizer.step()
+                        if criterion == criterion_ce:
+                            loss = criterion(logits, b_labels.view(-1)) 
+                        elif criterion == criterion_bce:
+                            labels_one_hot = F.one_hot(b_labels, num_classes=5).float()
+                            loss = criterion(logits, labels_one_hot)
+                        elif criterion == criterion_kl:
+                            labels_one_hot = F.one_hot(b_labels, num_classes=5).float()
+                            log_probs = F.log_softmax(logits, dim=-1)
+                            loss = criterion(log_probs, labels_one_hot) 
+                        elif criterion == "mixed": 
+                            # == setup ==
+                            lambda_bce = 1
+                            lambda_mse = 0.1
+                            # ===========
+                            labels_one_hot = F.one_hot(b_labels, num_classes=5).float()
+                            loss_bce = nn.BCEWithLogitsLoss()(logits, labels_one_hot)
+                            probabilities = F.softmax(logits, dim=1)
 
-                    sst_train_loss += loss.item()
-                    sst_num_batches += 1
+                            # calculate expected score over the softmax distribution
+                            scores = torch.tensor([1, 2, 3, 4, 5], dtype=torch.float32, device=device).unsqueeze(0)  # (1, 5)
+                            expected_scores = torch.matmul(probabilities, scores.T).squeeze(1)  # (N,)
+
+                            # MSE between the expected scores and true scores
+                            # print(expected_scores)
+                            # print(b_labels)
+                            loss_mse = nn.MSELoss()(expected_scores, b_labels.float())
+                            loss = lambda_bce * loss_bce + lambda_mse * loss_mse
+                            
+                            
+                        # elif criterion == criterion_ord:
+                        #     loss = criterion(logits, b_labels) 
+                        # elif criterion == criterion_cumlink:
+                        #     loss = criterion(F.softmax(logits, dim = 1), F.one_hot(b_labels, num_classes = 5))
+                            
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(sst_optimizer)
+                    gradscaler.update()
+                    if args.use_ema:
+                        ema.update()
+                else:  # vanilla
+                    logits = model.predict_sentiment(b_ids, b_mask)
+                    if criterion == criterion_ce:
+                        loss = criterion(logits, b_labels.view(-1)) 
+                    elif criterion == criterion_bce:
+                        labels_one_hot = F.one_hot(b_labels, num_classes=5).float()
+                        loss = criterion(logits, labels_one_hot) 
+                    elif criterion == criterion_kl:
+                        labels_one_hot = F.one_hot(b_labels, num_classes=5).float()
+                        log_probs = F.log_softmax(logits, dim=-1)
+                        loss = criterion(log_probs, labels_one_hot) 
+                    
+                    loss.backward()
+                    sst_optimizer.step()
+                    if args.use_ema:
+                        ema.update()
+
+                sst_train_loss += loss.item()
+                sst_num_batches += 1
+                
+                if global_batch_counter % args.log_every == 0:
+                    fractional_epoch = epoch + (global_batch_counter / total_global_batches)
+                    writer.add_scalar('SST/Train_Loss', sst_train_loss / sst_num_batches, fractional_epoch)
             
             if benchmark:
                 total_sst_time += time.time() - start_time
@@ -253,38 +353,45 @@ def train_multitask(args, benchmark=False):
             para_num_batches = 0
             
             start_time = time.time()
-            for i in range(args.num_quora_trains):
-                for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-                    (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
+            for batch in tqdm(para_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
 
-                    b_ids1 = b_ids1.to(device)
-                    b_mask1 = b_mask1.to(device)
-                    b_ids2 = b_ids2.to(device)
-                    b_mask2 = b_mask2.to(device)
-                    b_labels = b_labels.to(device)
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
 
-                    para_optimizer.zero_grad()
+                para_optimizer.zero_grad()
 
-                    if args.amp:  # auto multi-precision
-                        with torch.cuda.amp.autocast():
-                            logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
-                            b_labels = b_labels.flatten().float()  # reshape to match logits
-                            criterion = torch.nn.BCEWithLogitsLoss()  # more stable, can autocast
-                            loss = criterion(logits, b_labels)
-
-                        gradscaler.scale(loss).backward()
-                        gradscaler.step(para_optimizer)
-                        gradscaler.update()
-                    else:  # vanilla
+                if args.amp:  # auto multi-precision
+                    with torch.cuda.amp.autocast():
                         logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
                         b_labels = b_labels.flatten().float()  # reshape to match logits
                         criterion = torch.nn.BCEWithLogitsLoss()  # more stable, can autocast
-                        loss = criterion(logits, b_labels)
-                        loss.backward()
-                        para_optimizer.step()
+                        loss = criterion(logits, b_labels) 
 
-                    para_train_loss += loss.item()
-                    para_num_batches += 1
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(para_optimizer)
+                    gradscaler.update()
+                    if args.use_ema:
+                        ema.update()
+                else:  # vanilla
+                    logits = model.predict_paraphrase(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
+                    b_labels = b_labels.flatten().float()  # reshape to match logits
+                    criterion = torch.nn.BCEWithLogitsLoss()  # more stable, can autocast
+                    loss = criterion(logits, b_labels) 
+                    loss.backward()
+                    para_optimizer.step()
+                    if args.use_ema:
+                        ema.update()
+
+                para_train_loss += loss.item()
+                para_num_batches += 1
+                
+                if global_batch_counter % args.log_every == 0:
+                    fractional_epoch = epoch + (global_batch_counter / total_global_batches)
+                    writer.add_scalar('Quora/Train_Loss', para_train_loss / para_num_batches, fractional_epoch)
 
             if benchmark:
                 total_para_time += time.time() - start_time
@@ -300,46 +407,81 @@ def train_multitask(args, benchmark=False):
             sts_num_batches = 0
 
             start_time = time.time()
-            for i in range(args.num_sts_trains):
-                for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-                    (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
+            for batch in tqdm(sts_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
+                (b_ids1, b_mask1, b_ids2, b_mask2, b_labels, b_sent_ids) = (batch['token_ids_1'], batch['attention_mask_1'], batch['token_ids_2'], batch['attention_mask_2'], batch['labels'], batch['sent_ids'])
 
-                    b_ids1 = b_ids1.to(device)
-                    b_mask1 = b_mask1.to(device)
-                    b_ids2 = b_ids2.to(device)
-                    b_mask2 = b_mask2.to(device)
-                    b_labels = b_labels.to(device)
+                b_ids1 = b_ids1.to(device)
+                b_mask1 = b_mask1.to(device)
+                b_ids2 = b_ids2.to(device)
+                b_mask2 = b_mask2.to(device)
+                b_labels = b_labels.to(device)
 
-                    sts_optimizer.zero_grad()
+                sts_optimizer.zero_grad()
 
-                    # =========== Set Up STS Criterion ============
-                    # criterion = torch.nn.MSELoss()  # MSE loss since labels are 0-5
-                    criterion = pearson_correlation_loss
+                # =========== Set Up STS Criterion ============
+                criterion_mse = nn.MSELoss()  # MSE loss since labels are 0-5
+                criterion_pearson = pearson_correlation_loss
+                
+                criterion = criterion_pearson
 
-                    if args.amp:  # auto multi-precision
-                        with torch.cuda.amp.autocast():
-                            logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
-                            b_labels = b_labels.flatten().float()  # reshape to match logits
-                            loss = criterion(logits, b_labels)
-
-                        gradscaler.scale(loss).backward()
-                        gradscaler.step(sts_optimizer)
-                        gradscaler.update()
-                    else:  # vanilla
+                if args.amp:  # auto multi-precision
+                    with torch.cuda.amp.autocast():
                         logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
                         b_labels = b_labels.flatten().float()  # reshape to match logits
-                        loss = criterion(logits, b_labels)
-                        loss.backward()
-                        sts_optimizer.step()
+                        if criterion in [criterion_mse, criterion_pearson]:
+                            loss = criterion(logits, b_labels) 
+                        elif criterion == "mixed":
+                            lambda_mse = 0.5 
+                            lambda_pears = 1.0
+                            mse_loss = criterion_mse(logits, b_labels) 
+                            pears_loss = pearson_correlation_loss(logits, b_labels)
+                            loss = lambda_mse * mse_loss + lambda_pears * pears_loss
 
-                    sts_train_loss += loss.item()
-                    sts_num_batches += 1
+                    gradscaler.scale(loss).backward()
+                    gradscaler.step(sts_optimizer)
+                    gradscaler.update()
+                    if args.use_ema:
+                        ema.update()
+                else:  # vanilla
+                    logits = model.predict_similarity(b_ids1, b_mask1, b_ids2, b_mask2).flatten()
+                    b_labels = b_labels.flatten().float()  # reshape to match logits
+                    if criterion in [criterion_mse, criterion_pearson]:
+                        loss = criterion(logits, b_labels) 
+                    elif criterion == "mixed":
+                        lambda_mse = 0.5 
+                        lambda_pears = 1.0
+                        mse_loss = nn.MSELoss(logits, b_labels) 
+                        pears_loss = pearson_correlation_loss(logits)
+                        loss = lambda_mse * mse_loss + lambda_pears * pears_loss
+                    loss.backward()
+                    sts_optimizer.step()
+                    if args.use_ema:
+                        ema.update()
+
+                sts_train_loss += loss.item()
+                sts_num_batches += 1
+                
+                if global_batch_counter % args.log_every == 0:
+                    fractional_epoch = epoch + (global_batch_counter / total_global_batches)
+                    writer.add_scalar('STS/Train_Loss', sts_train_loss / sts_num_batches, fractional_epoch)
+
             if benchmark:
                 total_sts_time += time.time() - start_time
                 peak_memory_sts = torch.cuda.max_memory_allocated() / (1024 ** 3)  # Convert bytes to GB
                 total_sts_memory += peak_memory_sts
             sts_train_loss = sts_train_loss / sts_num_batches
-
+    
+        if args.use_ema:
+            print("=== Averaging the EMA model and Updating BNs ====")
+            ema_model = ema.apply_shadow()
+            dataloaders = [sst_train_dataloader, para_train_dataloader, sts_train_dataloader]
+            # Update batch norm statistics for each dataloader
+            for dataloader in dataloaders:
+                torch.optim.swa_utils.update_bn(dataloader, ema_model)
+            print("=== Swapping in EMA Model for Eval ====")
+            og_model = model
+            model = ema_model
+            
         print(f"\n============== End of Epoch Evaluation ==============")
 
         # ====== Compute SST Accs ========
@@ -389,7 +531,7 @@ def train_multitask(args, benchmark=False):
         dev_leaderboard_score = get_leaderboard_score(sst_dev_acc if args.train_sst else 0, 
                                             para_dev_acc if args.train_quora and args.quora_epoch_eval else 0, 
                                             sts_dev_corr if args.train_sts else 0)
-        if dev_leaderboard_score > best_leaderboard_score:  # TODO: come up with more clever checkpointing than just caring about SST
+        if dev_leaderboard_score > best_leaderboard_score:  
             best_leaderboard_score = dev_leaderboard_score
             print(f"New Best Leaderboard Avg. Score: {best_leaderboard_score:.3f}!")
             save_model(model, 
@@ -397,10 +539,24 @@ def train_multitask(args, benchmark=False):
                        args, 
                        config, 
                        args.filepath)
+        if args.use_ema:
+            print("=== Swapping OG Model Back In Place of EMA for Training ====")
+            model = og_model
 
         # ========== step the learning rate schedulers ==========
+        sst_lr = sst_scheduler.get_last_lr()[0] 
+        para_lr = para_scheduler.get_last_lr()[0]
+        sts_lr = sts_scheduler.get_last_lr()[0]
+        
+        # print(f"\nLRs: {sst_lr}, {para_lr}, {sts_lr}")
+        
+        # Record the learning rates
+        writer.add_scalar('Learning_Rate/sst_lr', sst_lr, epoch)
+        writer.add_scalar('Learning_Rate/para_lr', para_lr, epoch )
+        writer.add_scalar('Learning_Rate/sts_lr', sts_lr, epoch )
         sst_scheduler.step()
-        para_scheduler.step()
+        if args.train_quora:
+            para_scheduler.step()
         sts_scheduler.step()
     writer.close()
     
@@ -534,27 +690,23 @@ def get_args():
     # dataset extra cleaning with nltk
     parser.add_argument("--extra_clean", action = 'store_true', default = False, help = "Perform extra nltk etc. data cleaning.")
 
-    # lr scheduling and optim
-    parser.add_argument("--sst_weight_decay", type=float, default=5e-3, help="Weight decay for SST sentiment dataset training")
-    parser.add_argument("--para_weight_decay", type=float, default=1e-5, help="Weight decay for paraphrase dataset training")
-    parser.add_argument("--sts_weight_decay", type=float, default=8e-3, help="Weight decay for STS dataset training")
-    parser.add_argument("--lr_lambda", type=float, default=0.5, help="Learning rate decay factor for each epoch")
-    parser.add_argument("--optim", type=str, choices=["RAdam", "Adamax", "SGD"], default="Adamax", help="Optimizer to use (RAdam or Adamax or SGD)")
-    parser.add_argument("--sst_lr_multiplier", type=float, default=10, help="Learning rate multiplier for SST sentiment dataset")
-    parser.add_argument("--para_lr_multiplier", type=float, default=1.0, help="Learning rate multiplier for paraphrase dataset")
-    parser.add_argument("--sts_lr_multiplier", type=float, default=3, help="Learning rate multiplier for STS dataset")
-
+    # Exponential Moving Average (EMA) model
+    parser.add_argument("--use_ema", action = 'store_true', default = False, help="Use an Exponential Moving Average (EMA) model framework.")
+    
+    # number of backbone BERTS
+    parser.add_argument("--num_berts", type=int, default=1, help = "Number of BERT backbones for the model. ")
+    
+    parser.add_argument("--log_every", type = int, default = 50, help = "Every # of batches to log train stats.")
+    
+    # lr scheduling 
+    #TODO
 
     # dataset selections for training
     parser.add_argument("--train_sst", action='store_true', help='Train against SST sentiment dataset (CELoss)')
     parser.add_argument("--train_quora", action='store_true', help='Train against Quora paraphrase dataset (BCELoss) (costly!)')
     parser.add_argument("--train_sts", action='store_true', help='Train against STS similarity dataset (BCELoss)')
+    parser.add_argument("--iterative_quora", action = 'store_true', default = False, help = "Don't train quora until unfreezing starts." )
     parser.add_argument("--quora_epoch_eval", action='store_true', help='Evaluate quora performance every epoch (Costly!!)')
-    parser.add_argument("--num_sst_trains", type= int, default = 1, help = "multiplier of extra training loops per epoch")
-    parser.add_argument("--num_quora_trains", type= int, default = 1)
-    parser.add_argument("--num_sts_trains", type= int, default = 1)
-
-
 
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
     parser.add_argument("--sst_dev", type=str, default="data/ids-sst-dev.csv")
@@ -613,8 +765,8 @@ def append_results_to_csv(args, metrics):
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-{args.optim}-{args.sst_lr_multiplier}-{args.para_lr_multiplier}-{args.sts_lr_multiplier}-{args.num_sst_trains}-{args.num_quora_trains}-{args.num_sts_trains}-multitask.pt' # Save path.
-    seed_everything(args.seed)  # Fix the seed for reproducibility.
+    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-{args.clf}-multitask.pt' # Save path.
+    # seed_everything(args.seed)  # Fix the seed for reproducibility.
     if args.benchmark:
         average_sst_time, average_para_time, average_sts_time, average_sst_memory, average_para_memory, average_sts_memory = train_multitask(args)
         dev_sentiment_accuracy, dev_paraphrase_accuracy, dev_sts_corr = test_multitask(args)
